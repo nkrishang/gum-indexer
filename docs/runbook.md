@@ -8,8 +8,10 @@
 3. **Variables**: `GUM_API__KEYS`, `GUM_WEBHOOK__SECRET`, and per chain `GUM_CHAINS__MONAD__HTTP_URL`,
    `GUM_CHAINS__MONAD__WS_URL` (same for `ARBITRUM`, `BASE`). Optional `GUM_QUICKNODE__API_KEY`.
    A chain you have no endpoint for yet: `GUM_CHAINS__<CHAIN>__ENABLED=false`.
-4. **Service settings** (`railway.toml` carries them; mirror them if the project uses Railway's TypeScript IaC —
-   Railway has announced config-as-code files stop being read on 2026-12-01, check before relying on the file):
+4. **Service settings** live on the Railway service itself — there is no config file in this repo. `railway.toml`
+   is deprecated (Railway stops reading it on 2026-12-01) and its TypeScript replacement would add an npm toolchain
+   to a Rust repo for two settings. Set them in the dashboard (Service → Settings) or through the API
+   (`serviceInstanceUpdate`: `healthcheckPath`, `healthcheckTimeout`, `drainingSeconds`, `overlapSeconds`):
 
    | Setting | Value | Why |
    |---|---|---|
@@ -19,11 +21,10 @@
    | Overlap seconds | `0` | Overlap is safe (see below) but buys nothing. |
    | Replicas | `1` | More are safe; only one ingests per chain, all serve the API and dispatch webhooks. |
    | Volume | none | State lives in Postgres. A volume would forbid replicas and force downtime on every deploy. |
+   | Region | EU West (`europe-west4-drams3a`) | App and Postgres (with its volume) sit in the same region; `railway scale --service <name> eu-west=1 sfo=0` moves one. |
 
-
-   Draining and overlap are also set as service variables (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`,
-   `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS=0`): Railway's TypeScript IaC has no field for them, and the variables keep
-   working after `railway.toml` stops being read. Secrets are pushed with `scripts/railway-set-vars.sh` from a
+   Draining and overlap are additionally set as service variables (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`,
+   `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS=0`). Secrets are pushed with `scripts/railway-set-vars.sh` from a
    git-ignored `.env.production` (values are never printed).
 
 5. **Metrics**: Railway does not scrape application metrics. Deploy the "Grafana Stack" (or any Prometheus) template
