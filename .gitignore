@@ -1,0 +1,5 @@
+/target
+.env
+config/local.generated.toml
+contracts/out
+contracts/cache

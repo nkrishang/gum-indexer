@@ -1,0 +1,6 @@
+target
+.git
+.env
+docs
+tests
+config/local.generated.toml

@@ -1,0 +1,3 @@
+[env]
+# Used by #[sqlx::test] (docker compose up -d postgres). Overridden by a real DATABASE_URL in the environment.
+DATABASE_URL = { value = "postgres://gum:gum@localhost:54329/gum", force = false }

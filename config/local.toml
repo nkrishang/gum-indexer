@@ -1,0 +1,39 @@
+# Local profile (GUM_PROFILE=local): the three chains are mimicked by local Anvil instances.
+# `cargo run --features testkit --bin gum-devnet` starts them, deploys the mock tokens and writes
+# config/local.generated.toml (token addresses), which is layered on top of this file.
+
+[webhook]
+allow_insecure_targets = true
+retry_base_ms = 250
+retry_cap_ms = 5000
+
+[chains.monad]
+chain_id = 143
+http_url = "http://127.0.0.1:18545"
+ws_url = "ws://127.0.0.1:18545"
+confirmations = 3
+expected_block_time_ms = 1000
+max_log_range = 100
+poll_interval_ms = 500
+safety_sweep_interval_ms = 5000
+idle_probe_interval_ms = 5000
+
+[chains.arbitrum]
+chain_id = 42161
+http_url = "http://127.0.0.1:18546"
+ws_url = "ws://127.0.0.1:18546"
+confirmations = 4
+expected_block_time_ms = 1000
+poll_interval_ms = 500
+safety_sweep_interval_ms = 5000
+idle_probe_interval_ms = 5000
+
+[chains.base]
+chain_id = 8453
+http_url = "http://127.0.0.1:18547"
+ws_url = "ws://127.0.0.1:18547"
+confirmations = 2
+expected_block_time_ms = 2000
+poll_interval_ms = 500
+safety_sweep_interval_ms = 5000
+idle_probe_interval_ms = 5000

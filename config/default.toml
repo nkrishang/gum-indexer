@@ -1,0 +1,119 @@
+# gum-indexer base configuration (mainnet profile).
+# Secrets and endpoint URLs come from the environment: GUM_<SECTION>__<KEY>, e.g.
+#   GUM_CHAINS__BASE__HTTP_URL, GUM_CHAINS__BASE__WS_URL, GUM_API__KEYS, GUM_WEBHOOK__SECRET.
+# DATABASE_URL and PORT are read as-is (Railway provides both).
+
+[server]
+bind = "::"
+port = 8080
+
+[database]
+max_connections = 16
+
+[watch]
+# Unpaid watches keep subscriptions and sweeps alive; expire them by default. 0 disables.
+default_ttl_secs = 604800
+
+[webhook]
+connect_timeout_ms = 3000
+request_timeout_ms = 10000
+max_concurrency = 64
+# Exponential backoff with full jitter between base and cap; an event is marked dead after max_age.
+retry_base_ms = 1000
+retry_cap_ms = 3600000
+max_age_secs = 86400
+# Consecutive failures after which a host is parked for host_park_ms (lightweight circuit breaker).
+host_failure_threshold = 5
+host_park_ms = 30000
+# Production: https only, no private/loopback targets.
+allow_insecure_targets = false
+
+# ---------------------------------------------------------------------------------------------
+# Chains. Adding a chain or a token is a config-only change.
+#
+# ingest_mode:
+#   auto         ws_targeted while active watches <= ws_targeted_max, then large_scale_mode
+#   ws_targeted  eth_subscribe(logs) filtered on recipient buckets: we are only notified of our own payments
+#   ws_firehose  one token-wide subscription, recipients matched in-process (cost ~ token transfer volume)
+#   poll         eth_getLogs(cursor+1..latest) every poll_interval_ms (also the fallback while WSS is down)
+# credits_per_call: QuickNode chain tier, used for the local credit estimate metric.
+# ---------------------------------------------------------------------------------------------
+
+[chains.monad]
+enabled = true
+chain_id = 143
+ingest_mode = "auto"
+large_scale_mode = "poll"
+confirmations = 3              # ~1s; MonadBFT finalizes in 2 blocks
+expected_block_time_ms = 300
+max_log_range = 100            # measured cap on QuickNode-run public RPC; raise after probing the paid endpoint
+poll_interval_ms = 3000
+safety_sweep_interval_ms = 30000
+idle_probe_interval_ms = 60000
+head_stall_threshold_ms = 15000
+credits_per_call = 30
+
+[[chains.monad.tokens]]
+symbol = "USDC"
+address = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
+decimals = 6
+issuance = "native"
+
+[[chains.monad.tokens]]
+symbol = "USDT"
+address = "0xe7cd86e13AC4309349F30B3435a9d337750fC82D"
+decimals = 6
+issuance = "usdt0"
+
+[[chains.monad.tokens]]
+symbol = "AUSD"
+address = "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a"
+decimals = 6
+issuance = "native"
+
+[chains.arbitrum]
+enabled = true
+chain_id = 42161
+ingest_mode = "auto"
+large_scale_mode = "poll"
+confirmations = 12             # ~3s of sequencer soft-finality
+expected_block_time_ms = 250
+max_log_range = 2000
+poll_interval_ms = 2000
+safety_sweep_interval_ms = 30000
+idle_probe_interval_ms = 60000
+head_stall_threshold_ms = 15000
+credits_per_call = 20
+
+[[chains.arbitrum.tokens]]
+symbol = "USDC"
+address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"   # native; NOT USDC.e (0xFF97...), whose symbol() is also "USDC"
+decimals = 6
+issuance = "native"
+
+[[chains.arbitrum.tokens]]
+symbol = "USDT"
+address = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
+decimals = 6
+issuance = "usdt0"
+
+[chains.base]
+enabled = true
+chain_id = 8453
+ingest_mode = "auto"
+large_scale_mode = "poll"
+confirmations = 3              # ~6s
+expected_block_time_ms = 2000
+max_log_range = 2000
+poll_interval_ms = 2000
+safety_sweep_interval_ms = 30000
+idle_probe_interval_ms = 60000
+head_stall_threshold_ms = 30000
+credits_per_call = 20
+
+# Base has no Tether-issued USDT or USDT0 (only a bridged token), so USDT is intentionally absent.
+[[chains.base.tokens]]
+symbol = "USDC"
+address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+decimals = 6
+issuance = "native"

@@ -1,0 +1,87 @@
+[package]
+default-run = "gum-indexer"
+name = "gum-indexer"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# Anvil harness, webhook sink and fault proxies shared by tests, gum-devnet and gum-bench.
+testkit = [
+    "alloy/node-bindings",
+    "alloy/provider-anvil-node",
+    "alloy/provider-anvil-api",
+    "alloy/signer-local",
+    "alloy/network",
+    "dep:hdrhistogram",
+    "dep:clap",
+]
+
+[[bin]]
+name = "gum-indexer"
+path = "src/main.rs"
+
+[[bin]]
+name = "gum-devnet"
+path = "src/bin/gum-devnet.rs"
+required-features = ["testkit"]
+
+[[bin]]
+name = "gum-bench"
+path = "src/bin/gum-bench.rs"
+required-features = ["testkit"]
+
+[[bin]]
+name = "gum-qn-probe"
+path = "src/bin/gum-qn-probe.rs"
+required-features = ["testkit"]
+
+[[bench]]
+name = "hot_path"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[dependencies]
+alloy = { version = "2.4.2", features = ["provider-http", "provider-ws", "pubsub", "rpc-types", "sol-types", "contract", "json-rpc", "transports", "rpc-client"] }
+anyhow = "1.0.104"
+axum = "0.8.9"
+backon = "1.6.0"
+bigdecimal = "0.4.10"
+bytes = "1.12.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+figment = { version = "0.10.19", features = ["toml", "env"] }
+foldhash = "0.2.0"
+futures-util = "0.3.34"
+hex = "0.4.3"
+hmac = "0.13.0"
+metrics = "0.24.6"
+metrics-exporter-prometheus = "0.18.3"
+papaya = "0.2.5"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "bigdecimal", "chrono", "json", "migrate", "macros"] }
+subtle = "2.6.1"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["trace", "limit", "request-id", "timeout"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+url = "2.5.8"
+uuid = { version = "1.26.1", features = ["v4", "v7", "serde"] }
+hdrhistogram = { version = "7.6.0", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+fastrand = "2.5.0"
+
+[dev-dependencies]
+gum-indexer = { path = ".", features = ["testkit"] }
+criterion = "0.8.2"
+wiremock = "0.6.5"
+dashmap = "6.2.1"

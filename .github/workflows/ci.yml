@@ -1,0 +1,40 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://gum:gum@localhost:5432/gum
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: gum
+          POSTGRES_PASSWORD: gum
+          POSTGRES_DB: gum
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gum" --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Unit, database (#[sqlx::test]) and Anvil end-to-end suites.
+      - run: cargo test --all-features -- --test-threads=4
+      # Benchmarks must keep compiling and running; numbers are tracked from release builds, not CI.
+      - run: cargo bench --all-features --bench hot_path -- --quick
+      - name: end-to-end load smoke (fails on any missed or duplicated payment)
+        run: cargo run --release --features testkit --bin gum-bench -- --watches 20000 --payments 200 --rate 100 --noise 10
