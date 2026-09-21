@@ -1,5 +1,7 @@
 /target
 .env
+.env.*
+!.env.example
 config/local.generated.toml
 contracts/out
 contracts/cache

@@ -20,6 +20,12 @@
    | Replicas | `1` | More are safe; only one ingests per chain, all serve the API and dispatch webhooks. |
    | Volume | none | State lives in Postgres. A volume would forbid replicas and force downtime on every deploy. |
 
+
+   Draining and overlap are also set as service variables (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30`,
+   `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS=0`): Railway's TypeScript IaC has no field for them, and the variables keep
+   working after `railway.toml` stops being read. Secrets are pushed with `scripts/railway-set-vars.sh` from a
+   git-ignored `.env.production` (values are never printed).
+
 5. **Metrics**: Railway does not scrape application metrics. Deploy the "Grafana Stack" (or any Prometheus) template
    in the same project and scrape `http://<service>.railway.internal:8080/metrics` over the private network. Do not
    expose `/metrics` publicly if you can avoid it (it is unauthenticated); `/v1/*` is what needs the public domain.
