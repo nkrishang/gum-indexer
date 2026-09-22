@@ -80,6 +80,19 @@ pub struct WebhookConfig {
     pub host_failure_threshold: u32,
     pub host_park_ms: u64,
     pub allow_insecure_targets: bool,
+    /// Consumers on the private network that may receive webhooks over http, e.g.
+    /// `["gum-server.railway.internal"]`. Set with GUM_WEBHOOK__HOST_ALLOWLIST='["host"]'.
+    #[serde(default)]
+    pub host_allowlist: Vec<String>,
+}
+
+impl WebhookConfig {
+    pub fn target_policy(&self) -> crate::webhook::target::TargetPolicy {
+        crate::webhook::target::TargetPolicy {
+            allow_insecure: self.allow_insecure_targets,
+            host_allowlist: self.host_allowlist.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

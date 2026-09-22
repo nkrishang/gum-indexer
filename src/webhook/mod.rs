@@ -47,7 +47,7 @@ impl Dispatcher {
             // A redirect could bounce a vetted public URL to an internal one.
             .redirect(reqwest::redirect::Policy::none());
         if !cfg.allow_insecure_targets {
-            builder = builder.dns_resolver(Arc::new(target::PublicOnlyResolver));
+            builder = builder.dns_resolver(Arc::new(target::PublicOnlyResolver { policy: cfg.target_policy() }));
         }
         Ok(Arc::new(Self {
             client: builder.build()?,

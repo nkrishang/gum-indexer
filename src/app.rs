@@ -68,7 +68,7 @@ impl App {
             chains: chains.clone(),
             api_keys: Arc::new(api_keys),
             default_ttl: (cfg.watch.default_ttl_secs > 0).then(|| Duration::from_secs(cfg.watch.default_ttl_secs)),
-            allow_insecure_targets: cfg.webhook.allow_insecure_targets,
+            target_policy: cfg.webhook.target_policy(),
             metrics,
         };
 

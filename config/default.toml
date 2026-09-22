@@ -25,8 +25,12 @@ max_age_secs = 86400
 # Consecutive failures after which a host is parked for host_park_ms (lightweight circuit breaker).
 host_failure_threshold = 5
 host_park_ms = 30000
-# Production: https only, no private/loopback targets.
+# Production: https only, no private/loopback targets...
 allow_insecure_targets = false
+# ...except these hosts, which may be private and reached over http. gum-server lives in the same
+# Railway project and is called back over the private network. Exact host names, no wildcards.
+#   GUM_WEBHOOK__HOST_ALLOWLIST='["gum-server.railway.internal"]'
+host_allowlist = []
 
 # ---------------------------------------------------------------------------------------------
 # Chains. Adding a chain or a token is a config-only change.

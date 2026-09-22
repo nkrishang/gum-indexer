@@ -7,7 +7,24 @@ use std::net::{IpAddr, SocketAddr};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use url::{Host, Url};
 
-pub fn validate(raw: &str, allow_insecure: bool) -> Result<Url, String> {
+/// What a webhook target may be. Production keeps the defaults (public https only) and names the
+/// consumers that live on the private network in `host_allowlist`; the local profile allows everything.
+#[derive(Debug, Clone, Default)]
+pub struct TargetPolicy {
+    /// Accept http and private / loopback hosts everywhere (local development only).
+    pub allow_insecure: bool,
+    /// Hosts that may be private and reached over http, e.g. `gum-server.railway.internal`. Exact,
+    /// case-insensitive host names; no wildcards, so the list stays an explicit inventory.
+    pub host_allowlist: Vec<String>,
+}
+
+impl TargetPolicy {
+    pub fn is_allowlisted(&self, host: &str) -> bool {
+        self.host_allowlist.iter().any(|h| h.eq_ignore_ascii_case(host))
+    }
+}
+
+pub fn validate(raw: &str, policy: &TargetPolicy) -> Result<Url, String> {
     let url = Url::parse(raw).map_err(|e| format!("not a valid URL: {e}"))?;
     if raw.len() > 2048 {
         return Err("URL is longer than 2048 characters".into());
@@ -15,14 +32,15 @@ pub fn validate(raw: &str, allow_insecure: bool) -> Result<Url, String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("credentials in the URL are not allowed".into());
     }
+    let host = url.host().ok_or("URL has no host")?;
+    let allowlisted = matches!(&host, Host::Domain(d) if policy.is_allowlisted(d));
     match url.scheme() {
         "https" => {}
-        "http" if allow_insecure => {}
+        "http" if policy.allow_insecure || allowlisted => {}
         "http" => return Err("webhook_endpoint must use https".into()),
         other => return Err(format!("unsupported scheme {other}")),
     }
-    let host = url.host().ok_or("URL has no host")?;
-    if allow_insecure {
+    if policy.allow_insecure || allowlisted {
         return Ok(url);
     }
     match host {
@@ -70,14 +88,18 @@ pub fn is_public(ip: IpAddr) -> bool {
 }
 
 /// Resolver that drops non-public answers; a name resolving only to private addresses fails to connect.
-pub struct PublicOnlyResolver;
+/// Allowlisted hosts (the private-network consumers) keep every answer.
+pub struct PublicOnlyResolver {
+    pub policy: TargetPolicy,
+}
 
 impl Resolve for PublicOnlyResolver {
     fn resolve(&self, name: Name) -> Resolving {
+        let allowlisted = self.policy.is_allowlisted(name.as_str());
         Box::pin(async move {
             let host = name.as_str().to_owned();
             let resolved = tokio::net::lookup_host((host.as_str(), 0)).await?;
-            let public: Vec<SocketAddr> = resolved.filter(|a| is_public(a.ip())).collect();
+            let public: Vec<SocketAddr> = resolved.filter(|a| allowlisted || is_public(a.ip())).collect();
             if public.is_empty() {
                 return Err(format!("{host} does not resolve to a public address").into());
             }
@@ -90,9 +112,13 @@ impl Resolve for PublicOnlyResolver {
 mod tests {
     use super::*;
 
+    fn production() -> TargetPolicy {
+        TargetPolicy::default()
+    }
+
     #[test]
     fn production_rules() {
-        assert!(validate("https://merchant.example/hooks", false).is_ok());
+        assert!(validate("https://merchant.example/hooks", &production()).is_ok());
         for bad in [
             "http://merchant.example/hooks",
             "ftp://merchant.example",
@@ -107,13 +133,27 @@ mod tests {
             "https://user:pw@merchant.example/hook",
             "not a url",
         ] {
-            assert!(validate(bad, false).is_err(), "{bad} should be rejected");
+            assert!(validate(bad, &production()).is_err(), "{bad} should be rejected");
         }
     }
 
     #[test]
     fn local_profile_allows_loopback_http() {
-        assert!(validate("http://127.0.0.1:9000/hook", true).is_ok());
-        assert!(validate("gopher://127.0.0.1", true).is_err());
+        let local = TargetPolicy { allow_insecure: true, host_allowlist: vec![] };
+        assert!(validate("http://127.0.0.1:9000/hook", &local).is_ok());
+        assert!(validate("gopher://127.0.0.1", &local).is_err());
+    }
+
+    #[test]
+    fn allowlisted_private_hosts_are_accepted_over_http_and_nothing_else_changes() {
+        let policy = TargetPolicy { allow_insecure: false, host_allowlist: vec!["gum-server.railway.internal".into()] };
+        assert!(validate("http://gum-server.railway.internal:8080/v1/webhooks/indexer", &policy).is_ok());
+        assert!(validate("http://GUM-SERVER.railway.internal:8080/x", &policy).is_ok(), "case-insensitive");
+        assert!(validate("https://merchant.example/hooks", &policy).is_ok());
+        assert!(validate("http://merchant.example/hooks", &policy).is_err(), "other hosts still need https");
+        assert!(validate("http://postgres.railway.internal/hook", &policy).is_err(), "no wildcard on the suffix");
+        assert!(validate("http://gum-server.railway.internal.evil.example/x", &policy).is_err(), "exact match only");
+        assert!(validate("https://127.0.0.1/hook", &policy).is_err());
+        assert!(policy.is_allowlisted("gum-server.railway.internal") && !policy.is_allowlisted("gum-server"));
     }
 }

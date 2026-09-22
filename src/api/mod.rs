@@ -36,7 +36,7 @@ pub struct ApiState {
     pub chains: Arc<HashMap<u64, Arc<ChainRuntime>>>,
     pub api_keys: Arc<Vec<String>>,
     pub default_ttl: Option<Duration>,
-    pub allow_insecure_targets: bool,
+    pub target_policy: target::TargetPolicy,
     pub metrics: PrometheusHandle,
 }
 
@@ -209,7 +209,7 @@ async fn create_watch(
         return Err(ApiError::invalid("payment_address must not be the zero address"));
     }
     let threshold = parse_threshold(&req.balance_threshold)?;
-    let url = target::validate(&req.webhook_endpoint, state.allow_insecure_targets)
+    let url = target::validate(&req.webhook_endpoint, &state.target_policy)
         .map_err(|m| ApiError::invalid(format!("webhook_endpoint: {m}")))?;
     let expires_at = match req.expires_at {
         Some(at) if at <= Utc::now() => return Err(ApiError::invalid("expires_at is in the past")),
