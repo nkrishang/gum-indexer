@@ -1,6 +1,6 @@
 # gum-indexer base configuration (mainnet profile).
 # Secrets and endpoint URLs come from the environment: GUM_<SECTION>__<KEY>, e.g.
-#   GUM_CHAINS__BASE__HTTP_URL, GUM_CHAINS__BASE__WS_URL, GUM_API__KEYS, GUM_WEBHOOK__SECRET.
+#   GUM_CHAINS__BASE__HTTP_URL, GUM_CHAINS__BASE__WS_URL, GUM_WEBHOOK__SECRET.
 # DATABASE_URL and PORT are read as-is (Railway provides both).
 
 [server]

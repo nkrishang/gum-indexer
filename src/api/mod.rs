@@ -1,4 +1,5 @@
-//! HTTP API. `/v1/*` needs a bearer key; health and metrics endpoints are open (keep `/metrics` on the
+//! HTTP API. There is no authentication by design: the service is only reachable on the private network
+//! (keep `/metrics` on the
 //! private network in production).
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -6,9 +7,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use alloy::primitives::{Address, U256};
 use axum::{
     Json, Router,
-    extract::{Path, Request, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    middleware::{self, Next},
+    extract::{Path, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -17,7 +17,6 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
-use subtle::ConstantTimeEq;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 use uuid::Uuid;
 
@@ -34,7 +33,6 @@ pub struct ApiState {
     pub pool: PgPool,
     pub registry: Registry,
     pub chains: Arc<HashMap<u64, Arc<ChainRuntime>>>,
-    pub api_keys: Arc<Vec<String>>,
     pub default_ttl: Option<Duration>,
     pub target_policy: target::TargetPolicy,
     pub metrics: PrometheusHandle,
@@ -45,8 +43,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/watches", post(create_watch))
         .route("/watches/{id}", get(get_watch).delete(cancel_watch))
         .route("/chains", get(list_chains))
-        .route("/stats", get(stats))
-        .layer(middleware::from_fn_with_state(state.clone(), require_key));
+        .route("/stats", get(stats));
     Router::new()
         .nest("/v1", v1)
         .route("/healthz", get(healthz))
@@ -88,21 +85,6 @@ impl From<StoreError> for ApiError {
         tracing::error!(error.kind = e.kind(), error = %e, "API request failed on the database");
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "storage is temporarily unavailable; retry")
     }
-}
-
-async fn require_key(State(state): State<ApiState>, headers: HeaderMap, req: Request, next: Next) -> Response {
-    let presented = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default()
-        .as_bytes();
-    // Compare against every key without short-circuiting.
-    let ok = state.api_keys.iter().fold(false, |acc, k| acc | bool::from(k.as_bytes().ct_eq(presented)));
-    if !ok {
-        return ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid API key").into_response();
-    }
-    next.run(req).await
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -3,6 +3,10 @@
 Watches payment addresses for incoming ERC-20 stablecoin transfers, tells your webhook about each payment, and
 retires the address once the confirmed total crosses a threshold. Rust, Postgres, QuickNode RPC, deployed on Railway.
 
+Internal service: it has **no public domain and no authentication**. It lives in the same Railway project as
+[gum-server](https://github.com/nkrishang/gum-server) and [gum-engine](https://github.com/nkrishang/gum-engine)
+and is only reachable over the project's private network (`gum-indexer.railway.internal`).
+
 Supported out of the box (config-only to extend):
 
 | Chain | USDC | USDT | AUSD |
@@ -42,7 +46,8 @@ per chain, isolated and supervised:
 
 ## API
 
-All `/v1` routes need `Authorization: Bearer <key>` (keys from `GUM_API__KEYS`). Amounts are **base-unit** integers
+No authentication: the private network is the boundary (never give this service a public domain). Amounts are
+**base-unit** integers
 as strings (USDC has 6 decimals: `"2500000"` = 2.5 USDC).
 
 ```
@@ -90,7 +95,9 @@ Delivery is **at-least-once** and **ordered per watch** (`sequence`); dedupe on 
 Failures are retried with exponential backoff and jitter for 24 h, then marked dead (and logged).
 Verify `X-Gum-Signature: t=<unix>,v1=<hex>` = `HMAC-SHA256(GUM_WEBHOOK__SECRET, "<t>.<raw body>")` and reject old
 timestamps — see `webhook::sign::verify`. Endpoints must be public `https` URLs (private and loopback targets are
-refused, at registration and again at DNS resolution).
+refused, at registration and again at DNS resolution), except hosts named in `webhook.host_allowlist`
+(`GUM_WEBHOOK__HOST_ALLOWLIST='["gum-server.railway.internal"]'`), which may be private and reached over http.
+That is how gum-server, in the same Railway project, is called back without leaving the private network.
 
 ## Local mode
 
@@ -126,8 +133,8 @@ Results: [docs/benchmarks.md](docs/benchmarks.md).
 | Variable | |
 |---|---|
 | `DATABASE_URL` | Postgres |
-| `GUM_API__KEYS` | comma-separated bearer keys |
 | `GUM_WEBHOOK__SECRET` | HMAC signing secret |
+| `GUM_WEBHOOK__HOST_ALLOWLIST` | JSON array of private hosts that may receive webhooks, e.g. `["gum-server.railway.internal"]` |
 | `GUM_CHAINS__<CHAIN>__HTTP_URL` / `__WS_URL` | QuickNode endpoints per enabled chain |
 | `GUM_CHAINS__<CHAIN>__ENABLED=false` | run without a chain |
 | `GUM_QUICKNODE__API_KEY` | optional; exports credits used / remaining |

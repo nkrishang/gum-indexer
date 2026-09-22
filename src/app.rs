@@ -49,13 +49,6 @@ impl App {
         telemetry::spawn_upkeep(metrics.clone(), cancel.clone());
         telemetry::quicknode_usage::spawn(cfg.quicknode.api_key.clone(), cancel.clone());
 
-        let api_keys = cfg.api.key_list();
-        if api_keys.is_empty() {
-            tracing::warn!(
-                error.kind = "config_no_api_keys",
-                "GUM_API__KEYS is empty: every /v1 request will be rejected"
-            );
-        }
         if cfg.webhook.secret.is_empty() {
             tracing::warn!(
                 error.kind = "config_no_webhook_secret",
@@ -66,7 +59,6 @@ impl App {
             pool: pool.clone(),
             registry,
             chains: chains.clone(),
-            api_keys: Arc::new(api_keys),
             default_ttl: (cfg.watch.default_ttl_secs > 0).then(|| Duration::from_secs(cfg.watch.default_ttl_secs)),
             target_policy: cfg.webhook.target_policy(),
             metrics,

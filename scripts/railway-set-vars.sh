@@ -6,7 +6,7 @@ set -euo pipefail
 
 SERVICE="${1:-gum-indexer}"
 FILE="${2:-.env.production}"
-REQUIRED=(GUM_API__KEYS GUM_WEBHOOK__SECRET)
+REQUIRED=(GUM_WEBHOOK__SECRET)
 
 [ -f "$FILE" ] || { echo "missing $FILE" >&2; exit 1; }
 

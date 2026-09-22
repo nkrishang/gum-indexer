@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::{api::WatchResponse, app::App, config::Config};
 
-pub const API_KEY: &str = "test-key";
 pub const WEBHOOK_SECRET: &str = "test-webhook-secret";
 
 /// One chain of a test configuration. URLs may point at Anvil directly or at a fault proxy.
@@ -168,13 +167,7 @@ impl TestApp {
     }
 
     pub async fn create_watch_raw(&self, body: serde_json::Value) -> reqwest::Response {
-        self.client
-            .post(format!("{}/v1/watches", self.base_url))
-            .bearer_auth(API_KEY)
-            .json(&body)
-            .send()
-            .await
-            .expect("POST /v1/watches")
+        self.client.post(format!("{}/v1/watches", self.base_url)).json(&body).send().await.expect("POST /v1/watches")
     }
 
     pub async fn create_watch(
@@ -205,7 +198,7 @@ impl TestApp {
     }
 
     pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> T {
-        let resp = self.client.get(format!("{}{path}", self.base_url)).bearer_auth(API_KEY).send().await.expect("GET");
+        let resp = self.client.get(format!("{}{path}", self.base_url)).send().await.expect("GET");
         assert!(resp.status().is_success(), "GET {path} → {}", resp.status());
         resp.json().await.expect("json body")
     }

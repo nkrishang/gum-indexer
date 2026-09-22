@@ -81,11 +81,9 @@ async fn up() -> anyhow::Result<()> {
     let sink = gum_indexer::testkit::sink::WebhookSink::start_on(19000).await;
     println!("webhook sink listening on {} (use it as webhook_endpoint)\n", sink.url());
     println!(
-        "start the service:  GUM_PROFILE=local DATABASE_URL=postgres://gum:gum@localhost:54329/gum GUM_API__KEYS=dev-key GUM_WEBHOOK__SECRET=dev cargo run"
+        "start the service:  GUM_PROFILE=local DATABASE_URL=postgres://gum:gum@localhost:54329/gum GUM_WEBHOOK__SECRET=dev cargo run"
     );
-    println!(
-        "register a watch:   curl -s localhost:8080/v1/watches -H 'authorization: Bearer dev-key' -H 'content-type: application/json' \\"
-    );
+    println!("register a watch:   curl -s localhost:8080/v1/watches -H 'content-type: application/json' \\");
     println!(
         "                      -d '{{\"payment_address\":\"0x000000000000000000000000000000000000dEaD\",\"chain\":\"base\",\"token\":\"USDC\",\"balance_threshold\":\"5000000\",\"webhook_endpoint\":\"{}\"}}'",
         sink.url()

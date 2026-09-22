@@ -23,8 +23,6 @@ pub struct Config {
     pub profile: String,
     pub server: ServerConfig,
     pub database: DatabaseConfig,
-    #[serde(default)]
-    pub api: ApiConfig,
     pub watch: WatchConfig,
     pub webhook: WebhookConfig,
     #[serde(default)]
@@ -47,19 +45,6 @@ pub struct DatabaseConfig {
     #[serde(default)]
     pub url: String,
     pub max_connections: u32,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ApiConfig {
-    /// Comma-separated bearer keys. Empty means the API refuses every authenticated route.
-    #[serde(default)]
-    pub keys: String,
-}
-
-impl ApiConfig {
-    pub fn key_list(&self) -> Vec<String> {
-        self.keys.split(',').map(str::trim).filter(|k| !k.is_empty()).map(String::from).collect()
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -2,10 +2,14 @@
 
 ## Deploying on Railway
 
+The service is internal: **no public domain, no TCP proxy**. It must be a service of the same Railway project
+(and environment) as gum-server and gum-engine so that they reach each other over private networking
+(`gum-indexer.railway.internal`, IPv6, plain http on `PORT`). Keep every service and Postgres in one region.
+
 1. **Postgres**: add Railway's PostgreSQL to the project. Reference it from the service as
    `DATABASE_URL=${{Postgres.DATABASE_URL}}` (private network). Turn on volume backups.
 2. **Service**: deploy this repo. Railway builds the `Dockerfile` (cargo-chef layers; code-only changes rebuild fast).
-3. **Variables**: `GUM_API__KEYS`, `GUM_WEBHOOK__SECRET`, and per chain `GUM_CHAINS__MONAD__HTTP_URL`,
+3. **Variables**: `GUM_WEBHOOK__SECRET`, `GUM_WEBHOOK__HOST_ALLOWLIST='["gum-server.railway.internal"]'`, and per chain `GUM_CHAINS__MONAD__HTTP_URL`,
    `GUM_CHAINS__MONAD__WS_URL` (same for `ARBITRUM`, `BASE`). Optional `GUM_QUICKNODE__API_KEY`.
    A chain you have no endpoint for yet: `GUM_CHAINS__<CHAIN>__ENABLED=false`.
 4. **Service settings** live on the Railway service itself — there is no config file in this repo. `railway.toml`
@@ -28,8 +32,8 @@
    git-ignored `.env.production` (values are never printed).
 
 5. **Metrics**: Railway does not scrape application metrics. Deploy the "Grafana Stack" (or any Prometheus) template
-   in the same project and scrape `http://<service>.railway.internal:8080/metrics` over the private network. Do not
-   expose `/metrics` publicly if you can avoid it (it is unauthenticated); `/v1/*` is what needs the public domain.
+   in the same project and scrape `http://<service>.railway.internal:8080/metrics` over the private network. Nothing
+   on this service is authenticated, so nothing on it may be public.
 6. **QuickNode hardening**: enable token/JWT auth on the endpoints. With Railway static outbound IPs (Pro) you can
    also IP-allow-list them.
 

@@ -552,10 +552,15 @@ async fn api_validation_auth_and_idempotency(opts: PgPoolOptions, conn: PgConnec
         base
     };
 
+    // No credentials are needed: the private network is the boundary, so a bare request reaches validation.
     let client = reqwest::Client::new();
-    let unauthenticated =
-        client.post(format!("{}/v1/watches", app.base_url)).json(&body(serde_json::json!({}))).send().await.unwrap();
-    assert_eq!(unauthenticated.status(), 401);
+    let plain = client
+        .post(format!("{}/v1/watches", app.base_url))
+        .json(&body(serde_json::json!({ "payment_address": "0x1234" })))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), 422);
 
     for (patch, needle) in [
         (serde_json::json!({ "payment_address": "0x1234" }), "payment_address"),
@@ -590,25 +595,14 @@ async fn api_validation_auth_and_idempotency(opts: PgPoolOptions, conn: PgConnec
     assert_eq!(again.json::<gum_indexer::api::WatchResponse>().await.unwrap().id, created.id);
     assert_eq!(app.create_watch_raw(body(serde_json::json!({ "balance_threshold": "2000000" }))).await.status(), 409);
 
-    let cancelled = client
-        .delete(format!("{}/v1/watches/{}", app.base_url, created.id))
-        .bearer_auth("test-key")
-        .send()
-        .await
-        .unwrap();
+    let cancelled = client.delete(format!("{}/v1/watches/{}", app.base_url, created.id)).send().await.unwrap();
     assert_eq!(cancelled.json::<gum_indexer::api::WatchResponse>().await.unwrap().status, "cancelled");
     env.chain.mint(env.token, payee, usdc(1)).await;
     env.chain.mine(3).await;
     tokio::time::sleep(Duration::from_millis(1300)).await;
     assert!(env.sink.received().is_empty(), "cancelled watches are not reported");
     assert_eq!(
-        client
-            .get(format!("{}/v1/watches/{}", app.base_url, uuid::Uuid::new_v4()))
-            .bearer_auth("test-key")
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        client.get(format!("{}/v1/watches/{}", app.base_url, uuid::Uuid::new_v4())).send().await.unwrap().status(),
         404
     );
     app.shutdown().await;
