@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -34,6 +34,9 @@ struct Shared {
     fail_next: Arc<AtomicU32>,
     down: Arc<AtomicBool>,
     rejected: Arc<AtomicU32>,
+    delay_ms: Arc<AtomicU64>,
+    in_flight: Arc<AtomicU32>,
+    max_in_flight: Arc<AtomicU32>,
 }
 
 pub struct WebhookSink {
@@ -74,6 +77,16 @@ impl WebhookSink {
 
     pub fn rejected(&self) -> u32 {
         self.shared.rejected.load(Ordering::Acquire)
+    }
+
+    /// Every delivery takes at least `delay` to be answered, like a busy consumer.
+    pub fn set_delay(&self, delay: Duration) {
+        self.shared.delay_ms.store(delay.as_millis() as u64, Ordering::Release);
+    }
+
+    /// The most deliveries that were in progress at the same time.
+    pub fn max_in_flight(&self) -> u32 {
+        self.shared.max_in_flight.load(Ordering::Acquire)
     }
 
     pub fn received(&self) -> Vec<Received> {
@@ -119,6 +132,18 @@ impl Drop for WebhookSink {
 }
 
 async fn receive(State(shared): State<Shared>, headers: HeaderMap, body: Bytes) -> StatusCode {
+    let now = shared.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+    shared.max_in_flight.fetch_max(now, Ordering::AcqRel);
+    let delay = shared.delay_ms.load(Ordering::Acquire);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+    let status = respond(&shared, &headers, body);
+    shared.in_flight.fetch_sub(1, Ordering::AcqRel);
+    status
+}
+
+fn respond(shared: &Shared, headers: &HeaderMap, body: Bytes) -> StatusCode {
     if shared.down.load(Ordering::Acquire) {
         shared.rejected.fetch_add(1, Ordering::AcqRel);
         return StatusCode::SERVICE_UNAVAILABLE;

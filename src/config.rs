@@ -59,6 +59,11 @@ pub struct WebhookConfig {
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub max_concurrency: usize,
+    /// Most deliveries in progress to any one host. Keeps a burst from arriving at a consumer all
+    /// at once (the 2026-09-23 Monad incident: up to `max_concurrency` = 64 deliveries against
+    /// gum-server's 16-connection pool).
+    #[serde(default = "default_max_per_host")]
+    pub max_per_host: usize,
     pub retry_base_ms: u64,
     pub retry_cap_ms: u64,
     pub max_age_secs: u64,
@@ -273,6 +278,10 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn default_max_per_host() -> usize {
+    8
 }
 
 #[cfg(test)]
