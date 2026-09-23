@@ -13,6 +13,9 @@ max_connections = 16
 [watch]
 # Unpaid watches keep subscriptions and sweeps alive; expire them by default. 0 disables.
 default_ttl_secs = 604800
+# A caller that may register a watch late (gum-server's outbox) passes `payments_since`; blocks
+# already swept since then are scanned once for the new watch. This caps how far back.
+max_backfill_secs = 3600
 
 [webhook]
 connect_timeout_ms = 3000

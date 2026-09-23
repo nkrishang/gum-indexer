@@ -10,7 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy::rpc::types::Filter;
+use alloy::{
+    primitives::{Address, B256},
+    rpc::types::Filter,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{ChainRuntime, IngestError, SweepTrigger, matcher::TRANSFER_TOPIC};
@@ -21,6 +24,9 @@ use crate::{
         sweep::{self, SweepResult},
     },
 };
+
+/// Watches backfilled per `eth_getLogs` pass (their addresses go into one topic filter).
+const BACKFILL_BATCH: i64 = 50;
 
 struct Sweeper {
     rt: Arc<ChainRuntime>,
@@ -162,18 +168,7 @@ impl Sweeper {
             let logs = match rt.rpc.get_logs(&filter).await {
                 Ok(logs) => logs,
                 Err(e) if e.class() == RpcErrorClass::RangeTooLarge && self.range > 1 => {
-                    // Providers usually state their limit ("limited to a 10,000 range"); otherwise halve.
-                    let span = to - from + 1;
-                    self.range = match range_limit_hint(&e.to_string()) {
-                        Some(limit) if limit < span => limit.max(1),
-                        _ => (span / 2).max(1),
-                    };
-                    self.ceiling = self.range;
-                    self.ceiling_set_at = Instant::now();
-                    metrics::counter!("gum_sweep_range_shrinks_total", "chain" => chain).increment(1);
-                    if let Some(suppressed) = rt.limiter.check("range_shrink") {
-                        tracing::warn!(chain, from, to, new_range = self.range, suppressed, error = %e, "provider rejected log range; shrinking");
-                    }
+                    self.shrink_range(from, to, &e.to_string());
                     continue;
                 }
                 Err(e) if e.class() == RpcErrorClass::AheadOfHead => break,
@@ -214,10 +209,98 @@ impl Sweeper {
         }
 
         self.pending_blocks.retain(|b| *b > cursor);
+        self.backfill().await?;
         Ok(self
             .pending_blocks
             .first()
             .map(|first| self.depth_delay(first.saturating_sub(target).min(cfg.confirmations))))
+    }
+
+    /// The provider rejected `[from, to]` as too large: use the limit it states ("limited to a 10,000
+    /// range"), otherwise halve the span, and remember it as the ceiling.
+    fn shrink_range(&mut self, from: u64, to: u64, error: &str) {
+        let chain = self.rt.spec.name;
+        let span = to - from + 1;
+        self.range = match range_limit_hint(error) {
+            Some(limit) if limit < span => limit.max(1),
+            _ => (span / 2).max(1),
+        };
+        self.ceiling = self.range;
+        self.ceiling_set_at = Instant::now();
+        metrics::counter!("gum_sweep_range_shrinks_total", "chain" => chain).increment(1);
+        if let Some(suppressed) = self.rt.limiter.check("range_shrink") {
+            tracing::warn!(
+                chain,
+                from,
+                to,
+                new_range = self.range,
+                suppressed,
+                error,
+                "provider rejected log range; shrinking"
+            );
+        }
+    }
+
+    /// Scans, once, the already-swept blocks that late-registered watches care about (see
+    /// `store::create_watch`). All pending backfills of a batch share one `eth_getLogs` pass over
+    /// the union of their ranges, filtered to their addresses.
+    async fn backfill(&mut self) -> Result<(), IngestError> {
+        let rt = self.rt.clone();
+        let chain = rt.spec.name;
+        loop {
+            let batch = sweep::pending_backfills(&rt.pool, rt.spec.chain_id, BACKFILL_BATCH).await?;
+            let (Some(from), Some(to)) =
+                (batch.iter().map(|b| b.start_block).min(), batch.iter().map(|b| b.backfill_to).max())
+            else {
+                return Ok(());
+            };
+            let mut tokens: Vec<Address> = batch.iter().map(|b| b.token_address).collect();
+            tokens.sort_unstable();
+            tokens.dedup();
+            let recipients: Vec<B256> = batch.iter().map(|b| b.payment_address.into_word()).collect();
+
+            let mut logs = Vec::new();
+            let mut at = from;
+            while at <= to {
+                let end = (at + self.range - 1).min(to);
+                let filter = Filter::new()
+                    .address(tokens.clone())
+                    .event_signature(TRANSFER_TOPIC)
+                    .topic2(recipients.clone())
+                    .from_block(at)
+                    .to_block(end);
+                match rt.rpc.get_logs(&filter).await {
+                    Ok(mut found) => {
+                        logs.append(&mut found);
+                        at = end + 1;
+                    }
+                    Err(e) if e.class() == RpcErrorClass::RangeTooLarge && self.range > 1 => {
+                        self.shrink_range(at, end, &e.to_string());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            metrics::counter!("gum_logs_scanned_total", "chain" => chain, "source" => "backfill")
+                .increment(logs.len() as u64);
+
+            let out = sweep::apply_backfill(&rt.pool, &rt.spec, &rt.cache, &batch, &logs).await?;
+            tracing::info!(
+                chain,
+                watches = batch.len(),
+                from,
+                to,
+                transfers = out.confirmed.len(),
+                "backfilled watches registered after their blocks were swept"
+            );
+            self.report(&out, "backfill", &logs);
+            rt.note_cache_changed(&[], out.completed.len());
+            if out.events > 0 {
+                rt.dispatcher_wake.notify_one();
+            }
+            if (batch.len() as i64) < BACKFILL_BATCH {
+                return Ok(());
+            }
+        }
     }
 
     fn report(&self, out: &sweep::SweepOutcome, reason: &'static str, logs: &[alloy::rpc::types::Log]) {
@@ -232,7 +315,8 @@ impl Sweeper {
                     .record((now - ts as f64).max(0.0));
             }
         }
-        if out.confirmed_without_pending > 0 {
+        // Backfilled transfers predate their watch, so the push path could never have reported them.
+        if out.confirmed_without_pending > 0 && reason != "backfill" {
             metrics::counter!("gum_transfers_missed_by_push_total", "chain" => chain)
                 .increment(out.confirmed_without_pending as u64);
             // Expected after downtime or a WSS gap (reason = startup/ws_connect); on a plain safety tick it means

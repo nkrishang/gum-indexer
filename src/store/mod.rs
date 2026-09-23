@@ -131,6 +131,8 @@ pub struct WatchRow {
     pub webhook_url: String,
     pub status: String,
     pub start_block: u64,
+    /// Set while blocks `[start_block, backfill_to]`, swept before this watch existed, await a scan.
+    pub backfill_to: Option<u64>,
     pub next_event_seq: i64,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -150,6 +152,7 @@ impl WatchRow {
             webhook_url: row.try_get("webhook_url")?,
             status: row.try_get("status")?,
             start_block: row.try_get::<i64, _>("start_block")? as u64,
+            backfill_to: row.try_get::<Option<i64>, _>("backfill_to")?.map(|b| b as u64),
             next_event_seq: row.try_get("next_event_seq")?,
             created_at: row.try_get("created_at")?,
             completed_at: row.try_get("completed_at")?,
@@ -191,6 +194,8 @@ pub struct NewWatch {
     pub expires_at: Option<DateTime<Utc>>,
     /// Latest chain head known to this process. May be stale; staleness only moves `start_block` earlier.
     pub head_estimate: u64,
+    /// How many blocks before the head payments may already have arrived (0: none). See `create_watch`.
+    pub lookback_blocks: u64,
 }
 
 #[derive(Debug)]
@@ -229,7 +234,11 @@ pub async fn cursor(pool: &PgPool, chain_id: u64) -> Result<u64> {
 ///
 /// Correctness hinges on the cursor row lock: we hold it FOR SHARE while choosing `start_block` and inserting,
 /// sweeps hold it FOR UPDATE while they delta-load watches and advance the cursor. Hence a watch can never
-/// start at a block that a sweep (on any instance) has already passed without seeing it.
+/// start at a block that a sweep (on any instance) has already passed without seeing it -- except on
+/// purpose: a watch registered with a lookback (payments may predate the registration) can start at or
+/// below the cursor, and then records `backfill_to = cursor`. The blocks `[start_block, cursor]` are
+/// scanned once for it by the next sweep (`sweep::apply_backfill`), and everything above the cursor by
+/// the sweeps as usual, so no block is missed or counted twice.
 pub async fn create_watch(pool: &PgPool, new: &NewWatch) -> Result<CreateOutcome> {
     let mut tx = pool.begin().await?;
     let cursor = sqlx::query("SELECT confirmed_block FROM chain_cursors WHERE chain_id = $1 FOR SHARE")
@@ -238,11 +247,12 @@ pub async fn create_watch(pool: &PgPool, new: &NewWatch) -> Result<CreateOutcome
         .await?
         .ok_or(StoreError::MissingCursor(new.chain_id))?
         .try_get::<i64, _>(0)? as u64;
-    let start_block = cursor.max(new.head_estimate) + 1;
+    let start_block = start_block(cursor, new.head_estimate, new.lookback_blocks);
+    let backfill_to = (start_block <= cursor).then_some(cursor);
 
     let inserted = sqlx::query(
-        "INSERT INTO watches (id, chain_id, token_address, payment_address, threshold, webhook_url, start_block, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "INSERT INTO watches (id, chain_id, token_address, payment_address, threshold, webhook_url, start_block, expires_at, backfill_to)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (chain_id, token_address, payment_address) WHERE status = 'active' DO NOTHING
          RETURNING *",
     )
@@ -254,6 +264,7 @@ pub async fn create_watch(pool: &PgPool, new: &NewWatch) -> Result<CreateOutcome
     .bind(&new.webhook_url)
     .bind(start_block as i64)
     .bind(new.expires_at)
+    .bind(backfill_to.map(|b| b as i64))
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -279,6 +290,13 @@ pub async fn create_watch(pool: &PgPool, new: &NewWatch) -> Result<CreateOutcome
     };
     tx.commit().await?;
     Ok(outcome)
+}
+
+/// First block a new watch counts: the one after both the cursor and the head, or `lookback` blocks
+/// before the head when payments may already have arrived.
+pub fn start_block(cursor: u64, head_estimate: u64, lookback: u64) -> u64 {
+    let base = cursor.max(head_estimate);
+    if lookback == 0 { base + 1 } else { (base + 1).min(base.saturating_sub(lookback).max(1)) }
 }
 
 pub async fn get_watch(pool: &PgPool, id: Uuid) -> Result<Option<WatchRow>> {
@@ -563,6 +581,19 @@ pub(crate) async fn insert_event(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn start_block_covers_the_lookback_and_never_goes_below_one() {
+        use super::start_block;
+        // No lookback: the block after both the cursor and the head (unchanged behaviour).
+        assert_eq!(start_block(100, 140, 0), 141);
+        assert_eq!(start_block(100, 50, 0), 101, "a stale head estimate never starts below the cursor");
+        // A lookback within the unswept blocks: no backfill needed (start stays above the cursor).
+        assert_eq!(start_block(130, 140, 5), 135);
+        // A lookback reaching swept blocks: starts at or below the cursor (the caller then backfills).
+        assert_eq!(start_block(100, 105, 20), 85);
+        assert_eq!(start_block(100, 105, 1_000), 1);
+    }
+
     use super::*;
 
     #[test]
