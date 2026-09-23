@@ -114,6 +114,7 @@ secret = "test-webhook-secret"
 connect_timeout_ms = 1000
 request_timeout_ms = 2000
 max_concurrency = 64
+max_per_host = 8
 retry_base_ms = 50
 retry_cap_ms = 400
 max_age_secs = 3600

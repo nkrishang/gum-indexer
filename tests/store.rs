@@ -409,3 +409,50 @@ async fn registrations_racing_sweeps_are_never_skipped(pool: PgPool) {
     assert_eq!(store::active_watch_count(&f.pool, f.chain.chain_id).await.unwrap(), 320);
     assert_eq!(f.cache.len(), 320);
 }
+
+/// Regression for the 2026-09-23 Monad incident: a burst of events for one consumer went out with up
+/// to `max_concurrency` (64) deliveries at once, more than gum-server's 16-connection pool, and the
+/// consumer answered 503. Deliveries to one host are now capped at `max_per_host`; the rest wait in
+/// the outbox (without spending an attempt) and all arrive.
+#[sqlx::test]
+async fn deliveries_to_one_host_are_capped_and_nothing_is_lost(pool: PgPool) {
+    const WATCHES: u8 = 40;
+    const PER_HOST: usize = 4;
+    let f = Fixture::new(pool, 100).await;
+    let sink = gum_indexer::testkit::sink::WebhookSink::start().await;
+    sink.set_delay(Duration::from_millis(100));
+    for i in 1..=WATCHES {
+        f.watch(Address::repeat_byte(i), usdc(10), 100).await;
+    }
+    sqlx::query("UPDATE watches SET expires_at = now() - interval '1 second', webhook_url = $1")
+        .bind(sink.url())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(store::expire_watches(&f.pool, &f.chain, 100).await.unwrap().len(), WATCHES as usize);
+
+    let cfg = gum_indexer::config::WebhookConfig {
+        secret: "s".into(),
+        connect_timeout_ms: 1_000,
+        request_timeout_ms: 5_000,
+        max_concurrency: 64,
+        max_per_host: PER_HOST,
+        retry_base_ms: 50,
+        retry_cap_ms: 200,
+        max_age_secs: 3_600,
+        host_failure_threshold: 5,
+        host_park_ms: 1_000,
+        allow_insecure_targets: true,
+        host_allowlist: vec![],
+    };
+    let dispatcher =
+        gum_indexer::webhook::Dispatcher::new(f.pool.clone(), cfg, Arc::new(tokio::sync::Notify::new())).unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run = tokio::spawn(dispatcher.run(cancel.clone()));
+
+    let got = sink.wait_for("every watch.expired", Duration::from_secs(20), |got| got.len() == WATCHES as usize).await;
+    cancel.cancel();
+    let _ = run.await;
+    assert!(sink.max_in_flight() as usize <= PER_HOST, "{} deliveries at once", sink.max_in_flight());
+    assert!(got.iter().all(|r| r.attempt == 1), "waiting for a slot is not a failed attempt");
+}

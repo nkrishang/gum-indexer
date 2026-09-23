@@ -1,5 +1,6 @@
 //! Webhook delivery from the transactional outbox: at-least-once, ordered per watch, signed, with
-//! exponential backoff + full jitter and per-host parking so a dead endpoint cannot monopolise workers.
+//! exponential backoff + full jitter, per-host parking so a dead endpoint cannot monopolise workers,
+//! and a per-host concurrency cap so a burst of events does not land on one consumer all at once.
 
 pub mod sign;
 pub mod target;
@@ -14,6 +15,11 @@ use sqlx::PgPool;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+/// How long a delivery waits for a free slot on its host before going back to the queue.
+const HOST_SLOT_WAIT: Duration = Duration::from_secs(2);
+/// When it goes back, how soon it is due again. Not an attempt: nothing was sent.
+const HOST_BUSY_REQUEUE: Duration = Duration::from_millis(250);
+
 use crate::{
     config::WebhookConfig,
     store::outbox::{self, OutboxItem},
@@ -27,6 +33,8 @@ pub struct Dispatcher {
     wake: Arc<Notify>,
     permits: Arc<Semaphore>,
     hosts: Mutex<HashMap<String, HostState>>,
+    /// `max_per_host` delivery slots per host.
+    host_slots: Mutex<HashMap<String, Arc<Semaphore>>>,
     limiter: LogLimiter,
 }
 
@@ -56,6 +64,7 @@ impl Dispatcher {
             cfg,
             wake,
             hosts: Mutex::new(HashMap::new()),
+            host_slots: Mutex::new(HashMap::new()),
             limiter: LogLimiter::new(Duration::from_secs(30)),
         }))
     }
@@ -122,6 +131,11 @@ impl Dispatcher {
             let _ = outbox::release(&self.pool, item.id, wait).await;
             return;
         }
+        let Some(_slot) = self.host_slot(&host).await else {
+            metrics::counter!("gum_webhook_deliveries_total", "event" => event, "outcome" => "host_busy").increment(1);
+            let _ = outbox::release(&self.pool, item.id, HOST_BUSY_REQUEUE).await;
+            return;
+        };
 
         let body = match serde_json::to_vec(&item.payload) {
             Ok(b) => b,
@@ -181,6 +195,15 @@ impl Dispatcher {
                 error.kind = "webhook_failed", "webhook delivery failed; will retry");
         }
         let _ = outbox::mark_retry(&self.pool, item.id, delay, status, &error).await;
+    }
+
+    /// Waits (briefly) for one of the host's `max_per_host` delivery slots.
+    async fn host_slot(&self, host: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let slots = {
+            let mut all = self.host_slots.lock().unwrap();
+            all.entry(host.to_owned()).or_insert_with(|| Arc::new(Semaphore::new(self.cfg.max_per_host.max(1)))).clone()
+        };
+        tokio::time::timeout(HOST_SLOT_WAIT, slots.acquire_owned()).await.ok()?.ok()
     }
 
     fn parked_for(&self, host: &str) -> Option<Duration> {

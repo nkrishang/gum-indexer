@@ -18,6 +18,9 @@ default_ttl_secs = 604800
 connect_timeout_ms = 3000
 request_timeout_ms = 10000
 max_concurrency = 64
+# ...of which at most this many to any one host, so a burst queues here instead of arriving at a
+# consumer all at once (gum-server answers from a fixed-size database pool).
+max_per_host = 8
 # Exponential backoff with full jitter between base and cap; an event is marked dead after max_age.
 retry_base_ms = 1000
 retry_cap_ms = 3600000

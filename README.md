@@ -92,7 +92,9 @@ GET    /metrics             Prometheus
 | `watch.expired` | The watch hit its expiry first. |
 
 Delivery is **at-least-once** and **ordered per watch** (`sequence`); dedupe on `id`. Respond `2xx` within 10 s.
-Failures are retried with exponential backoff and jitter for 24 h, then marked dead (and logged).
+Failures are retried with exponential backoff and jitter for 24 h, then marked dead (and logged). At most
+`webhook.max_per_host` (8) deliveries are in flight to any one host; the rest wait their turn in the outbox, so a
+burst of payments reaches your endpoint at a steady rate rather than all at once.
 Verify `X-Gum-Signature: t=<unix>,v1=<hex>` = `HMAC-SHA256(GUM_WEBHOOK__SECRET, "<t>.<raw body>")` and reject old
 timestamps — see `webhook::sign::verify`. Endpoints must be public `https` URLs (private and loopback targets are
 refused, at registration and again at DNS resolution), except hosts named in `webhook.host_allowlist`
