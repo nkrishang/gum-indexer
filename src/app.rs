@@ -60,6 +60,7 @@ impl App {
             registry,
             chains: chains.clone(),
             default_ttl: (cfg.watch.default_ttl_secs > 0).then(|| Duration::from_secs(cfg.watch.default_ttl_secs)),
+            max_backfill: Duration::from_secs(cfg.watch.max_backfill_secs),
             target_policy: cfg.webhook.target_policy(),
             metrics,
         };

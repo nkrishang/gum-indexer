@@ -50,6 +50,9 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WatchConfig {
     pub default_ttl_secs: u64,
+    /// Furthest back a watch registered with `payments_since` is scanned for earlier payments.
+    #[serde(default = "default_max_backfill_secs")]
+    pub max_backfill_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -282,6 +285,10 @@ impl Config {
 
 fn default_max_per_host() -> usize {
     8
+}
+
+fn default_max_backfill_secs() -> u64 {
+    3600
 }
 
 #[cfg(test)]

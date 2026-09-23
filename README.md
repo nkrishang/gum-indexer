@@ -54,8 +54,16 @@ as strings (USDC has 6 decimals: `"2500000"` = 2.5 USDC).
 POST /v1/watches
 { "payment_address": "0x…", "chain": "base", "token": "USDC",
   "balance_threshold": "5000000", "webhook_endpoint": "https://you.example/hooks/gum",
-  "expires_at": "2026-10-01T00:00:00Z" }            # optional; default TTL 7 days (watch.default_ttl_secs)
+  "expires_at": "2026-10-01T00:00:00Z",             # optional; default TTL 7 days (watch.default_ttl_secs)
+  "payments_since": "2026-09-23T13:33:58Z" }        # optional; see below
 ```
+
+A watch counts transfers from the block after registration. If the address was handed out earlier (the caller
+registers asynchronously and may be delayed), pass `payments_since`: the watch then also counts transfers since that
+time, capped at `watch.max_backfill_secs` (1 h). Blocks the sweeper had already passed are scanned once for the new
+watch by the next sweep (a *backfill*, batched across watches into `eth_getLogs` calls filtered to their addresses),
+and those payments are delivered like any other, with their transactions. A registration made on time usually
+needs no backfill: its few blocks of lookback are still ahead of the sweeper.
 
 `blockchain` / `erc20_token` are accepted as aliases for `chain` / `token`; `chain` may be a slug or chain id, `token`
 a symbol or contract address from the registry. `201` created · `200` identical active watch already exists

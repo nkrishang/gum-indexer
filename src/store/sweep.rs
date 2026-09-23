@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{Result, StatsDelta, StoreError, WatchRow, apply_stats, insert_event, to_numeric};
 use crate::{
-    cache::{WatchCache, WatchKey},
+    cache::{WatchCache, WatchKey, WatchRef},
     events::{EventType, TransferView},
     ingest::matcher::{MatchedTransfer, match_log},
     registry::ChainSpec,
@@ -98,6 +98,168 @@ pub enum SweepResult {
     },
 }
 
+/// Counts one canonical transfer against its watch: records it as confirmed, adds it to the watch's
+/// total, queues `payment.confirmed`, and retires the watch with `threshold.reached` once the
+/// threshold is met. A no-op if the watch is no longer active or the transfer was already counted.
+async fn count_confirmed(
+    tx: &mut Transaction<'_, Postgres>,
+    chain: &ChainSpec,
+    m: MatchedTransfer,
+    stats: &mut HashMap<Address, StatsDelta>,
+    out: &mut SweepOutcome,
+) -> Result<()> {
+    let Some(watch) = lock_active_watch(tx, m.watch.id).await? else {
+        // Watch retired (completed earlier in this very chunk, cancelled, expired). A pending row, if any,
+        // is resolved by the sweep as `ignored`.
+        return Ok(());
+    };
+    let upserted = sqlx::query(
+        "INSERT INTO transfers (chain_id, block_hash, log_index, block_number, tx_hash, watch_id, from_address, amount, status, confirmed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'confirmed', now())
+         ON CONFLICT (chain_id, block_hash, log_index) DO UPDATE SET status = 'confirmed', confirmed_at = now()
+             WHERE transfers.status = 'pending'
+         RETURNING (xmax = 0) AS inserted",
+    )
+    .bind(chain.chain_id as i64)
+    .bind(m.block_hash.as_slice())
+    .bind(m.log_index as i64)
+    .bind(m.block_number as i64)
+    .bind(m.tx_hash.as_slice())
+    .bind(watch.id)
+    .bind(m.from.as_slice())
+    .bind(to_numeric(m.amount))
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(upserted) = upserted else {
+        // Already confirmed by an earlier (replayed) sweep: undo the speculative sequence bump.
+        sqlx::query("UPDATE watches SET next_event_seq = next_event_seq - 1 WHERE id = $1")
+            .bind(watch.id)
+            .execute(&mut **tx)
+            .await?;
+        return Ok(());
+    };
+    if upserted.try_get::<bool, _>("inserted")? {
+        out.confirmed_without_pending += 1;
+    }
+
+    let row = sqlx::query("UPDATE watches SET confirmed_amount = confirmed_amount + $2 WHERE id = $1 RETURNING *")
+        .bind(watch.id)
+        .bind(to_numeric(m.amount))
+        .fetch_one(&mut **tx)
+        .await?;
+    let mut watch = WatchRow::from_row(&row)?;
+    insert_event(tx, chain, &watch, EventType::PaymentConfirmed, Some(transfer_view(&m, "confirmed"))).await?;
+    let delta = stats.entry(watch.token_address).or_default();
+    delta.confirmed += 1;
+    delta.volume += m.amount;
+    out.events += 1;
+
+    if watch.confirmed_amount >= watch.threshold {
+        let row = sqlx::query(
+            "UPDATE watches SET status = 'completed', completed_at = now(), next_event_seq = next_event_seq + 1
+             WHERE id = $1 RETURNING *",
+        )
+        .bind(watch.id)
+        .fetch_one(&mut **tx)
+        .await?;
+        watch = WatchRow::from_row(&row)?;
+        insert_event(tx, chain, &watch, EventType::ThresholdReached, None).await?;
+        stats.entry(watch.token_address).or_default().thresholds += 1;
+        out.events += 1;
+        out.completed.push((WatchKey::new(m.token_idx, &m.to), watch.id));
+    }
+    out.confirmed.push(m);
+    Ok(())
+}
+
+/// A watch registered after blocks it cares about were swept (see `store::create_watch`): blocks
+/// `[start_block, backfill_to]` still need scanning for it.
+#[derive(Debug, Clone)]
+pub struct PendingBackfill {
+    pub id: Uuid,
+    pub seq: i64,
+    pub token_address: Address,
+    pub payment_address: Address,
+    pub start_block: u64,
+    pub backfill_to: u64,
+}
+
+/// Up to `limit` watches of the chain awaiting a backfill, oldest first.
+pub async fn pending_backfills(pool: &PgPool, chain_id: u64, limit: i64) -> Result<Vec<PendingBackfill>> {
+    let rows = sqlx::query(
+        "SELECT id, seq, token_address, payment_address, start_block, backfill_to FROM watches
+         WHERE chain_id = $1 AND backfill_to IS NOT NULL ORDER BY seq LIMIT $2",
+    )
+    .bind(chain_id as i64)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(PendingBackfill {
+                id: row.try_get("id")?,
+                seq: row.try_get("seq")?,
+                token_address: super::address(row, "token_address")?,
+                payment_address: super::address(row, "payment_address")?,
+                start_block: row.try_get::<i64, _>("start_block")? as u64,
+                backfill_to: row.try_get::<i64, _>("backfill_to")? as u64,
+            })
+        })
+        .collect()
+}
+
+/// Counts, for each watch in `backfills`, the transfers of its `[start_block, backfill_to]` found in
+/// `logs` (every Transfer log of those blocks to those addresses), and marks the backfills done --
+/// in one transaction, so a crash simply re-runs it and a re-run counts nothing twice. Blocks above
+/// `backfill_to` are the sweeps' business and are ignored here. Counting goes through the same path
+/// as a sweep, so events, totals and threshold crossings are identical.
+pub async fn apply_backfill(
+    pool: &PgPool,
+    chain: &ChainSpec,
+    cache: &WatchCache,
+    backfills: &[PendingBackfill],
+    logs: &[Log],
+) -> Result<SweepOutcome> {
+    let scope = WatchCache::new();
+    let mut until: HashMap<Uuid, u64> = HashMap::new();
+    for b in backfills {
+        if let Some(token) = chain.token_by_address(&b.token_address) {
+            scope.insert(
+                WatchKey::new(token.idx, &b.payment_address),
+                WatchRef { id: b.id, seq: b.seq, start_block: b.start_block },
+            );
+            until.insert(b.id, b.backfill_to);
+        }
+    }
+    let mut matched: Vec<MatchedTransfer> = logs
+        .iter()
+        .filter(|l| !l.removed)
+        .filter_map(|l| match_log(chain, &scope, l).ok())
+        .filter(|m| until.get(&m.watch.id).is_some_and(|to| m.block_number <= *to))
+        .collect();
+    matched.sort_by_key(|m| (m.block_number, m.log_index));
+
+    let mut tx = pool.begin().await?;
+    let mut out = SweepOutcome::default();
+    let mut stats: HashMap<Address, StatsDelta> = HashMap::new();
+    for m in matched {
+        count_confirmed(&mut tx, chain, m, &mut stats, &mut out).await?;
+    }
+    let ids: Vec<Uuid> = backfills.iter().map(|b| b.id).collect();
+    sqlx::query("UPDATE watches SET backfill_to = NULL WHERE id = ANY($1)").bind(&ids).execute(&mut *tx).await?;
+    let mut tokens: Vec<_> = stats.into_iter().collect();
+    tokens.sort_unstable_by_key(|(token, _)| *token); // fixed lock order
+    for (token, delta) in tokens {
+        apply_stats(&mut tx, chain.chain_id, &token, &delta).await?;
+    }
+    tx.commit().await?;
+
+    for (key, id) in &out.completed {
+        cache.remove(key, *id);
+    }
+    Ok(out)
+}
+
 /// Applies the canonical logs of `[from, to]` and advances the cursor to `to`, atomically.
 ///
 /// * `expected_cursor` – the cursor value the caller planned this chunk from; guards against split-brain.
@@ -151,67 +313,7 @@ pub async fn apply_sweep(
     let canonical: HashSet<(B256, u64)> = matched.iter().map(|m| (m.block_hash, m.log_index)).collect();
 
     for m in matched {
-        let Some(watch) = lock_active_watch(&mut tx, m.watch.id).await? else {
-            // Watch retired (completed earlier in this very chunk, cancelled, expired). A pending row, if any,
-            // is resolved below as `ignored`.
-            continue;
-        };
-        let upserted = sqlx::query(
-            "INSERT INTO transfers (chain_id, block_hash, log_index, block_number, tx_hash, watch_id, from_address, amount, status, confirmed_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'confirmed', now())
-             ON CONFLICT (chain_id, block_hash, log_index) DO UPDATE SET status = 'confirmed', confirmed_at = now()
-                 WHERE transfers.status = 'pending'
-             RETURNING (xmax = 0) AS inserted",
-        )
-        .bind(chain.chain_id as i64)
-        .bind(m.block_hash.as_slice())
-        .bind(m.log_index as i64)
-        .bind(m.block_number as i64)
-        .bind(m.tx_hash.as_slice())
-        .bind(watch.id)
-        .bind(m.from.as_slice())
-        .bind(to_numeric(m.amount))
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some(upserted) = upserted else {
-            // Already confirmed by an earlier (replayed) sweep: undo the speculative sequence bump.
-            sqlx::query("UPDATE watches SET next_event_seq = next_event_seq - 1 WHERE id = $1")
-                .bind(watch.id)
-                .execute(&mut *tx)
-                .await?;
-            continue;
-        };
-        if upserted.try_get::<bool, _>("inserted")? {
-            out.confirmed_without_pending += 1;
-        }
-
-        let row = sqlx::query("UPDATE watches SET confirmed_amount = confirmed_amount + $2 WHERE id = $1 RETURNING *")
-            .bind(watch.id)
-            .bind(to_numeric(m.amount))
-            .fetch_one(&mut *tx)
-            .await?;
-        let mut watch = WatchRow::from_row(&row)?;
-        insert_event(&mut tx, chain, &watch, EventType::PaymentConfirmed, Some(transfer_view(&m, "confirmed"))).await?;
-        let delta = stats.entry(watch.token_address).or_default();
-        delta.confirmed += 1;
-        delta.volume += m.amount;
-        out.events += 1;
-
-        if watch.confirmed_amount >= watch.threshold {
-            let row = sqlx::query(
-                "UPDATE watches SET status = 'completed', completed_at = now(), next_event_seq = next_event_seq + 1
-                 WHERE id = $1 RETURNING *",
-            )
-            .bind(watch.id)
-            .fetch_one(&mut *tx)
-            .await?;
-            watch = WatchRow::from_row(&row)?;
-            insert_event(&mut tx, chain, &watch, EventType::ThresholdReached, None).await?;
-            stats.entry(watch.token_address).or_default().thresholds += 1;
-            out.events += 1;
-            out.completed.push((WatchKey::new(m.token_idx, &m.to), watch.id));
-        }
-        out.confirmed.push(m);
+        count_confirmed(&mut tx, chain, m, &mut stats, &mut out).await?;
     }
 
     // Resolve every pending transfer at or below `to` that was not confirmed above.

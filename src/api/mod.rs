@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     events::{TransferView, u256_dec},
-    ingest::{ChainRuntime, health::HealthSnapshot, notify},
+    ingest::{ChainRuntime, SweepTrigger, health::HealthSnapshot, notify},
     registry::{ChainSpec, Registry},
     store::{self, CreateOutcome, NewWatch, StoreError, WatchRow},
     webhook::target,
@@ -34,6 +34,8 @@ pub struct ApiState {
     pub registry: Registry,
     pub chains: Arc<HashMap<u64, Arc<ChainRuntime>>>,
     pub default_ttl: Option<Duration>,
+    /// Cap on how far back `payments_since` reaches.
+    pub max_backfill: Duration,
     pub target_policy: target::TargetPolicy,
     pub metrics: PrometheusHandle,
 }
@@ -105,6 +107,11 @@ pub struct CreateWatchRequest {
     pub webhook_endpoint: String,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Payments may have reached the address since this time (e.g. it was handed out before this
+    /// registration). Blocks since then that were already swept are scanned once for the new watch.
+    /// Omitted: the watch counts transfers from the next block on. Capped at `watch.max_backfill_secs`.
+    #[serde(default)]
+    pub payments_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -207,6 +214,21 @@ async fn create_watch(
         )
     })?;
 
+    let lookback_blocks = match req.payments_since {
+        Some(since) => {
+            let age = (Utc::now() - since).to_std().unwrap_or_default();
+            if age > state.max_backfill {
+                tracing::warn!(
+                    chain = chain.name,
+                    age_secs = age.as_secs(),
+                    max_secs = state.max_backfill.as_secs(),
+                    "payments_since is older than watch.max_backfill_secs; scanning back only that far"
+                );
+            }
+            lookback_blocks(age.min(state.max_backfill), chain.cfg.expected_block_time_ms)
+        }
+        None => 0,
+    };
     let new = NewWatch {
         chain_id: chain.chain_id,
         token_address: token.address,
@@ -215,11 +237,16 @@ async fn create_watch(
         webhook_url: url.to_string(),
         expires_at,
         head_estimate: rt.head_estimate(),
+        lookback_blocks,
     };
     match store::create_watch(&state.pool, &new).await? {
         CreateOutcome::Created(w) => {
             if let Some((key, entry)) = w.cache_entry(chain) {
                 rt.add_watch(key, entry);
+            }
+            if let Some(to) = w.backfill_to {
+                tracing::info!(chain = chain.name, watch_id = %w.id, from = w.start_block, to, "watch registered late; blocks already swept will be scanned for it");
+                rt.request_sweep(SweepTrigger::Now("backfill"));
             }
             notify::announce_added(&state.pool, chain.chain_id, w.id).await;
             metrics::counter!("gum_watches_created_total", "chain" => chain.name, "token" => token.symbol).increment(1);
@@ -232,6 +259,13 @@ async fn create_watch(
             format!("an active watch ({}) already exists for this address and token with different parameters", w.id),
         )),
     }
+}
+
+/// Blocks produced in `age`, over-estimated (block times vary, and a missed block means a missed
+/// payment while an extra one costs nothing) and never zero, so a payment in the head block counts.
+pub fn lookback_blocks(age: Duration, expected_block_time_ms: u64) -> u64 {
+    let blocks = (age.as_millis() as u64 * 5 / 4).div_ceil(expected_block_time_ms.max(1));
+    blocks + 2
 }
 
 async fn load(state: &ApiState, id: Uuid) -> Result<(Arc<ChainSpec>, WatchRow), ApiError> {
@@ -387,4 +421,16 @@ async fn render_metrics(State(state): State<ApiState>) -> String {
         let _ = rt.health.snapshot();
     }
     state.metrics.render()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn lookback_over_estimates_blocks_and_is_never_zero() {
+        use std::time::Duration;
+        assert_eq!(super::lookback_blocks(Duration::ZERO, 300), 2);
+        // 60 s at 300 ms blocks is 200 blocks; +25% and 2 more.
+        assert_eq!(super::lookback_blocks(Duration::from_secs(60), 300), 252);
+        assert_eq!(super::lookback_blocks(Duration::from_millis(100), 0), 127, "a zero block time is treated as 1 ms");
+    }
 }

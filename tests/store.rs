@@ -52,6 +52,7 @@ impl Fixture {
             webhook_url: HOOK.into(),
             expires_at: None,
             head_estimate: head,
+            lookback_blocks: 0,
         };
         match store::create_watch(&self.pool, &new).await.unwrap() {
             CreateOutcome::Created(w) => {
@@ -107,6 +108,7 @@ async fn registration_is_idempotent_and_starts_after_cursor_and_head(pool: PgPoo
         webhook_url: HOOK.into(),
         expires_at: None,
         head_estimate: 150,
+        lookback_blocks: 0,
     };
     assert!(matches!(store::create_watch(&f.pool, &again).await.unwrap(), CreateOutcome::Existing(e) if e.id == w.id));
 
@@ -367,7 +369,8 @@ async fn registrations_racing_sweeps_are_never_skipped(pool: PgPool) {
                         threshold: usdc(1),
                         webhook_url: HOOK.into(),
                         expires_at: None,
-                        head_estimate: 0, // worst case: start_block is decided by the cursor alone
+                        head_estimate: 0,
+                        lookback_blocks: 0, // worst case: start_block is decided by the cursor alone
                     };
                     store::create_watch(&f.pool, &new).await.unwrap();
                 }
@@ -455,4 +458,68 @@ async fn deliveries_to_one_host_are_capped_and_nothing_is_lost(pool: PgPool) {
     let _ = run.await;
     assert!(sink.max_in_flight() as usize <= PER_HOST, "{} deliveries at once", sink.max_in_flight());
     assert!(got.iter().all(|r| r.attempt == 1), "waiting for a slot is not a failed attempt");
+}
+
+/// Regression for 2026-09-23: gum-server's outbox stalled, payers paid the deposit addresses
+/// meanwhile, and the watches registered afterwards started after the head, so those payments were
+/// never counted. A watch registered with a lookback that reaches swept blocks records a backfill;
+/// applying it counts exactly the transfers of `[start_block, backfill_to]`, once.
+#[sqlx::test]
+async fn a_watch_registered_late_is_backfilled_exactly_once(pool: PgPool) {
+    let f = Fixture::new(pool, 100).await;
+    let addr = Address::repeat_byte(1);
+    let new = NewWatch {
+        chain_id: f.chain.chain_id,
+        token_address: f.token,
+        payment_address: addr,
+        threshold: usdc(10),
+        webhook_url: HOOK.into(),
+        expires_at: None,
+        head_estimate: 100,
+        lookback_blocks: 10,
+    };
+    let w = match store::create_watch(&f.pool, &new).await.unwrap() {
+        CreateOutcome::Created(w) => w,
+        other => panic!("expected Created, got {other:?}"),
+    };
+    assert_eq!((w.start_block, w.backfill_to), (90, Some(100)), "blocks 90..=100 were swept before the watch existed");
+    let pending = sweep::pending_backfills(&f.pool, f.chain.chain_id, 50).await.unwrap();
+    assert_eq!(pending.len(), 1);
+
+    let logs = vec![
+        transfer_log(f.token, payer(), addr, usdc(1), 85, 0), // before the lookback window
+        transfer_log(f.token, payer(), addr, usdc(4), 95, 0),
+        transfer_log(f.token, payer(), Address::repeat_byte(2), usdc(9), 96, 0), // someone else
+        transfer_log(f.token, payer(), addr, usdc(6), 99, 1),
+        transfer_log(f.token, payer(), addr, usdc(5), 101, 0), // above backfill_to: the sweeps' business
+    ];
+    let out = sweep::apply_backfill(&f.pool, &f.chain, &f.cache, &pending, &logs).await.unwrap();
+    assert_eq!(out.confirmed.len(), 2);
+    assert_eq!(out.completed.len(), 1, "4 + 6 reaches the threshold of 10");
+    assert_eq!(f.event_types().await, ["payment.confirmed", "payment.confirmed", "threshold.reached"]);
+    assert!(sweep::pending_backfills(&f.pool, f.chain.chain_id, 50).await.unwrap().is_empty(), "marked done");
+
+    // A re-run (e.g. after a crash between the scan and the commit on another instance) counts nothing twice.
+    let again = sweep::apply_backfill(&f.pool, &f.chain, &f.cache, &pending, &logs).await.unwrap();
+    assert_eq!(again.confirmed.len(), 0);
+    assert_eq!(f.event_types().await.len(), 3);
+}
+
+/// Without a lookback (or one that stays within unswept blocks) nothing is backfilled.
+#[sqlx::test]
+async fn registration_on_time_needs_no_backfill(pool: PgPool) {
+    let f = Fixture::new(pool, 100).await;
+    let new = NewWatch {
+        chain_id: f.chain.chain_id,
+        token_address: f.token,
+        payment_address: Address::repeat_byte(3),
+        threshold: usdc(10),
+        webhook_url: HOOK.into(),
+        expires_at: None,
+        head_estimate: 110,
+        lookback_blocks: 3,
+    };
+    let CreateOutcome::Created(w) = store::create_watch(&f.pool, &new).await.unwrap() else { panic!("created") };
+    assert_eq!((w.start_block, w.backfill_to), (107, None));
+    assert!(sweep::pending_backfills(&f.pool, f.chain.chain_id, 50).await.unwrap().is_empty());
 }

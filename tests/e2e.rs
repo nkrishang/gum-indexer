@@ -607,3 +607,69 @@ async fn api_validation_auth_and_idempotency(opts: PgPoolOptions, conn: PgConnec
     );
     app.shutdown().await;
 }
+
+/// Regression for 2026-09-23, end to end: an address is paid, the sweeper moves past that block,
+/// and only then is its watch registered (the registering service was stalled). With
+/// `payments_since` the earlier payment is found by a backfill and delivered like any other;
+/// without it, it is not counted (the behaviour for callers that do not ask).
+#[sqlx::test]
+async fn payments_made_before_a_late_registration_are_counted(opts: PgPoolOptions, conn: PgConnectOptions) {
+    let env = Env::new("late").await;
+    let db = pool(opts, conn).await;
+    let app = TestApp::start(test_config(&[env.params()]), db.clone()).await;
+    env.watch(&app, fresh_address(), usdc(1_000_000)).await; // keeps sweeps advancing the cursor
+
+    let (late, unannounced) = (fresh_address(), fresh_address());
+    let handed_out = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let paid = env.chain.mint(env.token, late, usdc(4)).await;
+    env.chain.mint(env.token, unannounced, usdc(4)).await;
+    env.chain.mine(5).await;
+    // Once the durable cursor is past the payment, only a backfill can find it.
+    let deadline = std::time::Instant::now() + T;
+    loop {
+        let (cursor,): (i64,) = sqlx::query_as("SELECT confirmed_block FROM chain_cursors WHERE chain_id = 31337")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        if cursor as u64 >= paid.block_number {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "cursor never passed block {}", paid.block_number);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let resp = app
+        .create_watch_raw(serde_json::json!({
+            "payment_address": late, "chain": "late", "token": "USDC", "balance_threshold": usdc(10).to_string(),
+            "webhook_endpoint": env.sink.url(), "payments_since": handed_out,
+        }))
+        .await;
+    assert_eq!(resp.status(), 201);
+    let watch: gum_indexer::api::WatchResponse = resp.json().await.unwrap();
+    assert!(watch.start_block <= paid.block_number, "start {} after payment {}", watch.start_block, paid.block_number);
+
+    // Paid again after registering: counted by the sweeps as usual, which completes the threshold.
+    env.chain.mint(env.token, late, usdc(6)).await;
+    env.chain.mine(3).await;
+    let got = env
+        .sink
+        .wait_for("the backfilled payment, the live one, and threshold.reached", T, |got| {
+            got.iter().any(|r| r.payload.watch.id == watch.id && r.payload.event_type.as_str() == "threshold.reached")
+        })
+        .await;
+    let backfilled = got.iter().find(|r| {
+        r.payload.watch.id == watch.id
+            && r.payload.event_type.as_str() == "payment.confirmed"
+            && r.payload.transfer.as_ref().is_some_and(|t| t.tx_hash == paid.tx_hash)
+    });
+    assert!(backfilled.is_some(), "the payment made before registration is delivered with its transaction");
+    assert_eq!(app.get_watch(watch.id).await.confirmed_amount, usdc(10));
+    assert!(metric(&app.metrics().await, "gum_logs_scanned_total{chain=\"late\",source=\"backfill\"}") >= 1.0);
+
+    // Registered just as late, without `payments_since`: the earlier payment is not counted.
+    let control = env.watch(&app, unannounced, usdc(10)).await;
+    env.chain.mine(5).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(app.get_watch(control.id).await.confirmed_amount, U256::ZERO);
+    app.shutdown().await;
+}
