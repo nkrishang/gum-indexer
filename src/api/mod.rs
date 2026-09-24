@@ -320,6 +320,9 @@ struct TokenView {
     address: Address,
     decimals: u8,
     issuance: String,
+    /// Set when `Transfer` logs are indexed from an emitter other than `address` (Arc USDC).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transfer_log_address: Option<Address>,
 }
 
 fn chain_views(state: &ApiState) -> Vec<ChainView> {
@@ -341,6 +344,7 @@ fn chain_views(state: &ApiState) -> Vec<ChainView> {
                         address: t.address,
                         decimals: t.decimals,
                         issuance: t.issuance.clone(),
+                        transfer_log_address: (t.log_address != t.address).then_some(t.log_address),
                     })
                     .collect(),
                 active_watches: rt.cache.len(),

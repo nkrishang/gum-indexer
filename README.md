@@ -14,8 +14,12 @@ Supported out of the box (config-only to extend):
 | Monad (143) | native | USDT0 | native |
 | Arbitrum One (42161) | native | USDT0 | – |
 | Base (8453) | native | – ¹ | – |
+| Arc (5042) ² | native | – | – |
 
 ¹ Base has no Tether-issued USDT or USDT0, only a bridged token, so it is deliberately not offered.
+² Off until its endpoints are set (`GUM_CHAINS__ARC__ENABLED=true`). USDC is Arc's gas token: payments are read from
+the EIP-7708 system emitter, which logs native sends as well as ERC-20 transfers, and scaled from 18 to 6 decimals.
+Watches and webhooks use the ERC-20 address `0x3600…0000` and 6-decimal amounts, as on every other chain.
 
 ## How it works
 
@@ -36,7 +40,7 @@ per chain, isolated and supervised:
   notification therefore delay a payment; they cannot lose or double count it.
 * **Only confirmed amounts count** toward `balance_threshold`, and only transfers after the watch was registered.
   Confirmation depth is per chain and deliberately shallow (Monad 3 blocks ≈ finalized, Arbitrum 12 ≈ 3 s,
-  Base 3 ≈ 6 s) — not L1 finality.
+  Base 3 ≈ 6 s, Arc 2 ≈ 1 s on a chain with deterministic finality) — not L1 finality.
 * **Credit frugal.** Subscriptions are filtered on the recipient (`topics[2]`), in buckets of addresses, so QuickNode
   only ever notifies us about our own payments. A chain with no watches makes no log queries at all. Above
   `ws_targeted_max` watches the chain switches to a token-wide subscription or to polling (`large_scale_mode`).

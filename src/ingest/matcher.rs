@@ -37,7 +37,8 @@ pub enum Skip {
     Malformed,
     /// Log lacks block metadata (a pending-block log); never expected from our filters.
     Incomplete,
-    /// Zero-value transfer (address-poisoning spam).
+    /// Zero-value transfer (address-poisoning spam), or dust below one base unit once scaled from the log's
+    /// decimals (Arc native sends of less than 0.000001 USDC).
     ZeroValue,
     Unwatched,
     /// Watched, but the block predates the watch.
@@ -50,7 +51,7 @@ pub fn match_log(chain: &ChainSpec, cache: &WatchCache, log: &Log) -> Result<Mat
     if topics.first() != Some(&TRANSFER_TOPIC) {
         return Err(Skip::Foreign);
     }
-    let token = chain.token_by_address(&log.inner.address).ok_or(Skip::Foreign)?;
+    let token = chain.token_by_log_address(&log.inner.address).ok_or(Skip::Foreign)?;
     let data = log.inner.data.data.as_ref();
     if topics.len() != 3 || data.len() != 32 {
         return Err(Skip::Malformed);
@@ -66,7 +67,7 @@ pub fn match_log(chain: &ChainSpec, cache: &WatchCache, log: &Log) -> Result<Mat
     if block_number < watch.start_block {
         return Err(Skip::BeforeStart);
     }
-    let amount = U256::from_be_slice(data);
+    let amount = token.base_units(U256::from_be_slice(data));
     if amount.is_zero() {
         return Err(Skip::ZeroValue);
     }
@@ -178,5 +179,44 @@ pub(crate) mod tests {
             Bytes::new(),
         );
         assert_eq!(match_log(&chain, &cache, &malformed), Err(Skip::Malformed));
+    }
+
+    fn arc_chain() -> ChainSpec {
+        let cfg: Config = figment::Figment::new()
+            .merge(figment::providers::Toml::string(include_str!("../../config/default.toml")))
+            .merge(figment::providers::Toml::string("[database]\nurl=\"postgres://x\""))
+            .extract()
+            .unwrap();
+        ChainSpec::new("arc", cfg.chains["arc"].clone())
+    }
+
+    #[test]
+    fn arc_usdc_counts_the_system_emitter_once_in_base_units() {
+        let chain = arc_chain();
+        let usdc = &chain.tokens[0];
+        let (erc20, emitter) = (usdc.address, usdc.log_address);
+        assert_ne!(erc20, emitter);
+        let cache = WatchCache::new();
+        let payee = Address::repeat_byte(0x42);
+        cache.insert(WatchKey::new(usdc.idx, &payee), WatchRef { id: Uuid::new_v4(), seq: 1, start_block: 100 });
+        let payer = Address::repeat_byte(1);
+        let wei = |units: u64| U256::from(units) * U256::from(10u64).pow(U256::from(12u64));
+
+        // A native send of 2.5 USDC: logged by the system emitter only, at 18 decimals.
+        let native = transfer_log(emitter, payer, payee, wei(2_500_000), 100, 0);
+        let m = match_log(&chain, &cache, &native).unwrap();
+        assert_eq!((m.token_idx, m.amount), (usdc.idx, U256::from(2_500_000u64)));
+
+        // An ERC-20 transfer() logs twice; the ERC-20's own 6-decimal copy must not count again.
+        assert_eq!(
+            match_log(&chain, &cache, &transfer_log(erc20, payer, payee, U256::from(2_500_000u64), 101, 1)),
+            Err(Skip::Foreign)
+        );
+
+        // Sub-unit remainders are dropped, as balanceOf drops them; pure dust is not a payment.
+        let odd = transfer_log(emitter, payer, payee, wei(1) + U256::from(999u64), 102, 0);
+        assert_eq!(match_log(&chain, &cache, &odd).unwrap().amount, U256::from(1u64));
+        let dust = transfer_log(emitter, payer, payee, wei(1) - U256::from(1u64), 103, 0);
+        assert_eq!(match_log(&chain, &cache, &dust), Err(Skip::ZeroValue));
     }
 }

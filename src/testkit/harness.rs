@@ -19,6 +19,8 @@ pub struct ChainParams {
     pub http_url: String,
     pub ws_url: String,
     pub tokens: Vec<(String, Address)>,
+    /// Per symbol: a separate `Transfer` log emitter and its decimals (see `TokenConfig::transfer_log_address`).
+    pub log_sources: Vec<(String, Address, u8)>,
     pub ingest_mode: String,
     pub confirmations: u64,
     pub extra: String,
@@ -32,6 +34,7 @@ impl ChainParams {
             http_url,
             ws_url,
             tokens,
+            log_sources: Vec::new(),
             ingest_mode: "ws_targeted".into(),
             confirmations: 2,
             extra: String::new(),
@@ -40,6 +43,12 @@ impl ChainParams {
 
     pub fn mode(mut self, mode: &str) -> Self {
         self.ingest_mode = mode.into();
+        self
+    }
+
+    /// Indexes `symbol` from `emitter`'s `Transfer` logs, whose amounts carry `decimals` decimals.
+    pub fn log_source(mut self, symbol: &str, emitter: Address, decimals: u8) -> Self {
+        self.log_sources.push((symbol.into(), emitter, decimals));
         self
     }
 
@@ -90,6 +99,9 @@ credits_per_call = 20
                 "[[chains.{}.tokens]]\nsymbol = \"{symbol}\"\naddress = \"{address}\"\ndecimals = 6\nissuance = \"mock\"\n",
                 self.name
             ));
+            if let Some((_, emitter, decimals)) = self.log_sources.iter().find(|(s, ..)| s == symbol) {
+                out.push_str(&format!("transfer_log_address = \"{emitter}\"\ntransfer_log_decimals = {decimals}\n"));
+            }
         }
         out
     }

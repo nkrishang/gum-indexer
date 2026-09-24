@@ -76,7 +76,11 @@ impl TestChain {
     }
 
     pub async fn deploy_token(&self, symbol: &str) -> Address {
-        let token = MockERC20::deploy(self.provider(), format!("Mock {symbol}"), symbol.to_string(), 6)
+        self.deploy_token_with_decimals(symbol, 6).await
+    }
+
+    pub async fn deploy_token_with_decimals(&self, symbol: &str, decimals: u8) -> Address {
+        let token = MockERC20::deploy(self.provider(), format!("Mock {symbol}"), symbol.to_string(), decimals)
             .await
             .expect("deploy mock token");
         *token.address()

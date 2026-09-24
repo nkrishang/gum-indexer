@@ -10,7 +10,7 @@ The service is internal: **no public domain, no TCP proxy**. It must be a servic
    `DATABASE_URL=${{Postgres.DATABASE_URL}}` (private network). Turn on volume backups.
 2. **Service**: deploy this repo. Railway builds the `Dockerfile` (cargo-chef layers; code-only changes rebuild fast).
 3. **Variables**: `GUM_WEBHOOK__SECRET`, `GUM_WEBHOOK__HOST_ALLOWLIST='["gum-server.railway.internal"]'`, and per chain `GUM_CHAINS__MONAD__HTTP_URL`,
-   `GUM_CHAINS__MONAD__WS_URL` (same for `ARBITRUM`, `BASE`). Optional `GUM_QUICKNODE__API_KEY`.
+   `GUM_CHAINS__MONAD__WS_URL` (same for `ARBITRUM`, `BASE`, `ARC`). Optional `GUM_QUICKNODE__API_KEY`.
    A chain you have no endpoint for yet: `GUM_CHAINS__<CHAIN>__ENABLED=false`.
 4. **Service settings** live on the Railway service itself — there is no config file in this repo. `railway.toml`
    is deprecated (Railway stops reading it on 2026-12-01) and its TypeScript replacement would add an npm toolchain
@@ -65,7 +65,9 @@ cargo run --release --features testkit --bin gum-qn-probe -- billing --ws-url �
 
 ## Credits
 
-Flat per call: 20 credits (Arbitrum, Base), 30 (Monad); range and result size do not matter. Per chain, per month:
+Flat per call: 20 credits (Arbitrum, Base, Arc), 30 (Monad); range and result size do not matter. Per chain, per
+month (Arc costs the same as Arbitrum / Base: the model is per unit of time, not per block, so its 0.5 s blocks change
+nothing):
 
 | Component | Arbitrum / Base | Monad |
 |---|---|---|
@@ -75,8 +77,12 @@ Flat per call: 20 credits (Arbitrum, Base), 30 (Monad); range and result size do
 | Registration batch / bucket compaction: subscribe + unsubscribe | 40 | 60 |
 | Poll mode (fallback or `large_scale_mode = "poll"`): `poll_interval_ms` 2000 / 3000 | +25.9M | +25.9M |
 
-Everything idle ≈ 3M/month; three active chains in targeted mode ≈ 12M + payments; three chains polling ≈ 90M
-(Build plan: 80M, then $0.62/M). Knobs: `safety_sweep_interval_ms`, `poll_interval_ms`, `idle_probe_interval_ms`,
+Everything idle ≈ 3.9M/month; four active chains in targeted mode ≈ 16M + payments; four chains polling ≈ 120M
+(Build plan: 80M, then $0.62/M).
+
+Never use `ws_firehose` on Arc: its USDC stream is every USDC movement on the chain (~10 logs/s), about 26M
+notifications a month. Per-notification billing would put that far past the plan. Recipient-filtered subscriptions only
+notify us about our own payments. Knobs: `safety_sweep_interval_ms`, `poll_interval_ms`, `idle_probe_interval_ms`,
 `confirmations`, and the default watch TTL — an unpaid watch keeps its chain active, so expired watches matter.
 
 Watch `gum_rpc_credits_estimated_total` (local estimate, by chain and method) against
@@ -108,13 +114,31 @@ State transitions and anomalies are logged; routine events are counted. Every er
 
 ## Operations
 
-* **Add a token / chain**: add it to `config/default.toml` (or env), run `gum-qn-probe limits`, deploy. The startup
-  check refuses to ingest if `chainId` or `decimals()` disagree with the config.
+* **Add a token**: add it to `config/default.toml` (or env), deploy. The startup check refuses to ingest if
+  `decimals()` disagrees with the config.
+* **Add a chain** (EVM): no code change. Establish these facts, each of which sets a key in `[chains.<name>]`:
+
+  | Question | Key | How |
+  |---|---|---|
+  | Chain id | `chain_id` | Checked against `eth_chainId` at boot. |
+  | How final is a block? | `confirmations` | Reorg-prone: a depth that covers observed reorgs. Deterministic finality (Monad, Arc): still keep 2–3 blocks. That depth is also margin for load-balanced providers whose log index trails `eth_blockNumber`; some answer `eth_getLogs` for a block they have not indexed yet with an empty list, not an error, and the sweep would move its cursor past the payment. |
+  | Block time | `expected_block_time_ms`, `head_stall_threshold_ms` | Stall threshold ≈ 30 blocks, at least 15 s. |
+  | Provider limits | `max_log_range`, `ws_bucket_size`, `ws_targeted_max` | `gum-qn-probe limits`. |
+  | Provider price | `credits_per_call` | QuickNode's chain tier. |
+  | Token addresses and decimals | `[[chains.<name>.tokens]]` | From the issuer's docs, never from `symbol()`: bridged variants reuse symbols. |
+  | Does every way of moving the token emit the contract's `Transfer`? | `transfer_log_address`, `transfer_log_decimals` | Normally yes; leave both unset. Not for a gas-token stablecoin: on Arc, native USDC sends never touch the ERC-20, but the EIP-7708 system emitter logs every movement at 18 decimals. Point the token at the one emitter that sees every movement exactly once. |
+
+  Add the table with `enabled = false`, deploy, then set the URLs and `GUM_CHAINS__<NAME>__ENABLED=true`
+  (`scripts/railway-set-vars.sh` enables every chain in `config/default.toml` whose two URLs are present). A chain that
+  is enabled without URLs fails config validation and stops the whole service from booting, so do not ship a
+  new chain enabled. For `gum-qn-probe`, pass the emitter as `--token` when the token has one.
 * **Replay a dead webhook**: `UPDATE webhook_outbox SET status='pending', next_attempt_at=now() WHERE id='…';`
 * **Inspect a watch**: `GET /v1/watches/{id}` lists its transfers with status `pending | confirmed | orphaned | ignored`
   (`ignored` = canonical, but the watch was already retired).
 * **Accepted risk**: a reorg deeper than the chain's `confirmations` is not rolled back. Raise `confirmations` to
-  trade latency for safety; Monad's 3 is already finalized.
+  trade latency for safety; Monad's 3 and Arc's 2 are already finalized.
+* **Arc dust**: amounts are scaled from 18 to 6 decimals per transfer and rounded down, so a native send
+  below 0.000001 USDC counts for nothing and a remainder below that is dropped (`balanceOf` drops it too).
 * **`start_block`**: a watch counts transfers from the block after the latest head this process had seen at
   registration, never at or below the durable cursor. On a quiet chain that head can be up to one safety-sweep
   interval old, so a transfer made seconds *before* registration may count. Payment addresses are normally fresh,

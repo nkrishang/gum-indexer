@@ -142,6 +142,77 @@ async fn happy_path_pending_confirmed_threshold(opts: PgPoolOptions, conn: PgCon
     app.shutdown().await;
 }
 
+/// A token whose `Transfer` logs come from a separate emitter at more decimals (Arc's USDC: the ERC-20 at 0x3600…
+/// logs at 6 decimals, the EIP-7708 system emitter logs every movement at 18). Only the emitter counts, scaled to
+/// the token's decimals, so an ERC-20 transfer (logged by both) counts once and a native send is not missed.
+#[sqlx::test]
+async fn split_log_emitter_counts_each_payment_once_in_token_units(opts: PgPoolOptions, conn: PgConnectOptions) {
+    let env = Env::new("split_emitter").await;
+    let emitter = env.chain.deploy_token_with_decimals("SYS", 18).await;
+    let params = env.params().log_source("USDC", emitter, 18);
+    let app = TestApp::start(test_config(&[params]), pool(opts, conn).await).await;
+    let payee = fresh_address();
+    let watch = env.watch(&app, payee, usdc(5)).await;
+    wait_subscribed(&app, "split_emitter").await;
+    let wei = |units: U256| units * U256::from(10u64).pow(U256::from(12u64));
+
+    // An ERC-20-interface payment of 2 USDC: both emitters log it.
+    env.chain.mint(env.token, payee, usdc(2)).await;
+    let erc20_copy = env.chain.mint(emitter, payee, wei(usdc(2))).await;
+    env.chain.mine(2).await;
+    let got = env.sink.wait_for_types(&["payment.pending", "payment.confirmed"], T).await;
+    let confirmed = got.iter().find(|r| r.payload.event_type.as_str() == "payment.confirmed").unwrap();
+    let transfer = confirmed.payload.transfer.as_ref().unwrap();
+    assert_eq!((transfer.tx_hash, transfer.amount), (erc20_copy.tx_hash, usdc(2)), "scaled to 6 decimals");
+    assert_eq!(confirmed.payload.watch.token_address, env.token, "consumers see the ERC-20, not the emitter");
+    assert_eq!(app.get_watch(watch.id).await.confirmed_amount, usdc(2), "counted once");
+
+    // A native send of dust (below one base unit), then of 3 USDC: only the emitter logs these.
+    env.chain.mint(emitter, payee, U256::from(999_999_999_999u64)).await;
+    env.chain.mint(emitter, payee, wei(usdc(3))).await;
+    env.chain.mine(2).await;
+    env.sink
+        .wait_for_types(
+            &["payment.pending", "payment.confirmed", "payment.pending", "payment.confirmed", "threshold.reached"],
+            T,
+        )
+        .await;
+    let done = app.get_watch(watch.id).await;
+    assert_eq!((done.status.as_str(), done.confirmed_amount), ("completed", usdc(5)));
+    assert_eq!(done.transfers.unwrap().len(), 2, "dust is not a payment");
+
+    // A late registration's backfill reads the same emitter.
+    env.watch(&app, fresh_address(), usdc(1_000_000)).await; // keeps sweeps advancing the cursor
+    let late = fresh_address();
+    let handed_out = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let paid = env.chain.mint(emitter, late, wei(usdc(4))).await;
+    env.chain.mine(5).await;
+    let deadline = std::time::Instant::now() + T;
+    while app.get_json::<serde_json::Value>("/v1/chains").await["chains"][0]["health"]["confirmed_block"]
+        .as_u64()
+        .unwrap_or(0)
+        < paid.block_number
+    {
+        assert!(std::time::Instant::now() < deadline, "cursor never passed block {}", paid.block_number);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let resp = app
+        .create_watch_raw(serde_json::json!({
+            "payment_address": late, "chain": "split_emitter", "token": "USDC", "balance_threshold": usdc(10).to_string(),
+            "webhook_endpoint": env.sink.url(), "payments_since": handed_out,
+        }))
+        .await;
+    assert_eq!(resp.status(), 201);
+    let late_watch: gum_indexer::api::WatchResponse = resp.json().await.unwrap();
+    env.chain.mine(3).await;
+    let deadline = std::time::Instant::now() + T;
+    while app.get_watch(late_watch.id).await.confirmed_amount != usdc(4) {
+        assert!(std::time::Instant::now() < deadline, "backfill did not count the emitter's log");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    app.shutdown().await;
+}
+
 /// Payments that arrive while the service is down are recovered from the durable cursor — exactly once.
 #[sqlx::test]
 async fn crash_and_restart_recovers_payments_made_during_downtime(opts: PgPoolOptions, conn: PgConnectOptions) {

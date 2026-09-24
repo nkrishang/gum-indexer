@@ -159,7 +159,7 @@ impl Sweeper {
             }
         }
 
-        let tokens = rt.spec.token_addresses();
+        let tokens = rt.spec.log_addresses();
         while cursor < target {
             let from = cursor + 1;
             let to = (from + self.range - 1).min(target);
@@ -254,7 +254,11 @@ impl Sweeper {
             else {
                 return Ok(());
             };
-            let mut tokens: Vec<Address> = batch.iter().map(|b| b.token_address).collect();
+            // Watches name the token; its Transfer logs may come from another emitter (Arc USDC).
+            let mut tokens: Vec<Address> = batch
+                .iter()
+                .filter_map(|b| rt.spec.token_by_address(&b.token_address).map(|t| t.log_address))
+                .collect();
             tokens.sort_unstable();
             tokens.dedup();
             let recipients: Vec<B256> = batch.iter().map(|b| b.payment_address.into_word()).collect();
