@@ -65,7 +65,9 @@ cargo run --release --features testkit --bin gum-qn-probe -- billing --ws-url �
 
 ## Credits
 
-Flat per call: 20 credits (Arbitrum, Base), 30 (Monad); range and result size do not matter. Per chain, per month:
+Flat per call: 20 credits (Arbitrum, Base, Arc), 30 (Monad); range and result size do not matter. Per chain, per
+month (Arc costs the same as Arbitrum / Base: the model is per unit of time, not per block, so its 0.5 s blocks change
+nothing):
 
 | Component | Arbitrum / Base | Monad |
 |---|---|---|
@@ -75,8 +77,12 @@ Flat per call: 20 credits (Arbitrum, Base), 30 (Monad); range and result size do
 | Registration batch / bucket compaction: subscribe + unsubscribe | 40 | 60 |
 | Poll mode (fallback or `large_scale_mode = "poll"`): `poll_interval_ms` 2000 / 3000 | +25.9M | +25.9M |
 
-Everything idle ≈ 3M/month; three active chains in targeted mode ≈ 12M + payments; three chains polling ≈ 90M
-(Build plan: 80M, then $0.62/M). Knobs: `safety_sweep_interval_ms`, `poll_interval_ms`, `idle_probe_interval_ms`,
+Everything idle ≈ 3.9M/month; four active chains in targeted mode ≈ 16M + payments; four chains polling ≈ 120M
+(Build plan: 80M, then $0.62/M).
+
+Never use `ws_firehose` on Arc: its USDC stream is every USDC movement on the chain (~10 logs/s), about 26M
+notifications a month. Per-notification billing would put that far past the plan. Recipient-filtered subscriptions only
+notify us about our own payments. Knobs: `safety_sweep_interval_ms`, `poll_interval_ms`, `idle_probe_interval_ms`,
 `confirmations`, and the default watch TTL — an unpaid watch keeps its chain active, so expired watches matter.
 
 Watch `gum_rpc_credits_estimated_total` (local estimate, by chain and method) against

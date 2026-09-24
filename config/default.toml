@@ -138,17 +138,19 @@ issuance = "native"
 enabled = false
 chain_id = 5042
 ingest_mode = "auto"
+# Never ws_firehose here: the system emitter logs every USDC movement on Arc (~10/s measured 2026-09-24), so a
+# token-wide subscription would cost ~26M notifications a month if QuickNode bills per notification.
 large_scale_mode = "poll"
 # Arc finalizes deterministically: a block that exists is final, so confirmations are not reorg protection here.
 # The two blocks (~1s) are margin for load-balanced providers whose eth_getLogs backend trails eth_blockNumber.
 confirmations = 2
 expected_block_time_ms = 500
-max_log_range = 1000           # unmeasured; run gum-qn-probe limits with --token <the system emitter below>
+max_log_range = 1000           # ~5 logs/block, so a full span is ~3 MB; confirm with gum-qn-probe limits --token <system emitter>
 poll_interval_ms = 2000
 safety_sweep_interval_ms = 30000
 idle_probe_interval_ms = 60000
 head_stall_threshold_ms = 15000
-credits_per_call = 20          # unverified: check the Arc tier on QuickNode's pricing page
+credits_per_call = 20          # QuickNode's Arc page lists 20; confirm against gum_quicknode_credits_used after rollout
 
 # One asset, two interfaces: native USDC (18 decimals, msg.value) and the ERC-20 at 0x3600… (6 decimals) share one
 # balance. The ERC-20 only logs ERC-20-interface transfers; the EIP-7708 system emitter logs every movement at 18
