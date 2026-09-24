@@ -223,7 +223,7 @@ struct Session<'a> {
 impl Session<'_> {
     async fn subscribe(&self, recipients: Option<&[Address]>, kind: &'static str) -> Result<Bucket, &'static str> {
         let spec = &self.rt.spec;
-        let mut filter = Filter::new().address(spec.token_addresses()).event_signature(TRANSFER_TOPIC);
+        let mut filter = Filter::new().address(spec.log_addresses()).event_signature(TRANSFER_TOPIC);
         if let Some(addrs) = recipients {
             filter = filter.topic2(addrs.iter().map(|a| a.into_word()).collect::<Vec<B256>>());
         }
@@ -495,7 +495,7 @@ impl Poller {
         };
         // `latest` instead of a number saves the eth_blockNumber call that would otherwise pair with each poll.
         let filter = Filter::new()
-            .address(rt.spec.token_addresses())
+            .address(rt.spec.log_addresses())
             .event_signature(TRANSFER_TOPIC)
             .from_block(from)
             .to_block(BlockNumberOrTag::Latest);

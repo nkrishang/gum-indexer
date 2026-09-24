@@ -159,7 +159,7 @@ impl Sweeper {
             }
         }
 
-        let tokens = rt.spec.token_addresses();
+        let tokens = rt.spec.log_addresses();
         while cursor < target {
             let from = cursor + 1;
             let to = (from + self.range - 1).min(target);

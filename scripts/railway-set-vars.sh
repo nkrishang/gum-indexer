@@ -28,7 +28,10 @@ for r in "${REQUIRED[@]}"; do
 done
 
 # A chain without both URLs is deployed disabled instead of failing config validation at boot.
-for chain in BASE ARBITRUM MONAD; do
+# The chain list comes from the config, so a newly added chain is covered without editing this script.
+CHAINS=$(sed -nE 's/^\[chains\.([a-z0-9_]+)\][[:space:]]*(#.*)?$/\1/p' config/default.toml | tr '[:lower:]' '[:upper:]')
+[ -n "$CHAINS" ] || { echo "no [chains.*] tables found in config/default.toml" >&2; exit 1; }
+for chain in $CHAINS; do
   if printf '%s\n' "${KEYS[@]}" | grep -qx "GUM_CHAINS__${chain}__HTTP_URL" && printf '%s\n' "${KEYS[@]}" | grep -qx "GUM_CHAINS__${chain}__WS_URL"; then
     railway variable set "GUM_CHAINS__${chain}__ENABLED=true" --service "$SERVICE" --skip-deploys >/dev/null
     echo "chain ${chain}: enabled"

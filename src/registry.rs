@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, U256};
 
 use crate::config::{ChainConfig, Config};
 
@@ -15,6 +15,21 @@ pub struct TokenSpec {
     pub address: Address,
     pub decimals: u8,
     pub issuance: String,
+    /// Emitter of the `Transfer` logs we index: the token contract itself unless configured otherwise.
+    pub log_address: Address,
+    /// Divisor from log amounts to base units, when the logs use more decimals than the token (Arc USDC: 10^12).
+    pub log_scale: Option<U256>,
+}
+
+impl TokenSpec {
+    /// Converts a `Transfer` log amount to base units of `decimals`, rounding down.
+    #[inline]
+    pub fn base_units(&self, log_amount: U256) -> U256 {
+        match self.log_scale {
+            Some(scale) => log_amount / scale,
+            None => log_amount,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -37,6 +52,9 @@ impl ChainSpec {
                 address: t.address,
                 decimals: t.decimals,
                 issuance: t.issuance.clone(),
+                log_address: t.log_address(),
+                log_scale: (t.log_decimals() > t.decimals)
+                    .then(|| U256::from(10u64).pow(U256::from(t.log_decimals() - t.decimals))),
             })
             .collect();
         Self { name: leak(name), chain_id: cfg.chain_id, cfg, tokens }
@@ -58,8 +76,15 @@ impl ChainSpec {
         self.tokens.iter().find(|t| t.address == *address)
     }
 
-    pub fn token_addresses(&self) -> Vec<Address> {
-        self.tokens.iter().map(|t| t.address).collect()
+    /// Resolves the token a `Transfer` log belongs to by the log's emitter.
+    #[inline]
+    pub fn token_by_log_address(&self, emitter: &Address) -> Option<&TokenSpec> {
+        self.tokens.iter().find(|t| t.log_address == *emitter)
+    }
+
+    /// Emitters to filter `Transfer` logs on (`eth_getLogs`, `eth_subscribe`).
+    pub fn log_addresses(&self) -> Vec<Address> {
+        self.tokens.iter().map(|t| t.log_address).collect()
     }
 }
 

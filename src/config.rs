@@ -200,6 +200,26 @@ pub struct TokenConfig {
     /// Informational: native | usdt0 | bridged | mock.
     #[serde(default)]
     pub issuance: String,
+    /// Where this token's `Transfer` logs come from, when that is not the token contract. On Arc, USDC is the
+    /// gas token: native sends never touch the ERC-20 at 0x3600…, but every movement (native or ERC-20) is
+    /// logged by the EIP-7708 system emitter. Indexing the contract would miss native sends; indexing both
+    /// would count ERC-20 transfers twice.
+    #[serde(default)]
+    pub transfer_log_address: Option<Address>,
+    /// Decimals of the amounts in those logs (Arc: 18). Scaled down to `decimals`; remainders below one base
+    /// unit are dropped, as `balanceOf` drops them. Defaults to `decimals`.
+    #[serde(default)]
+    pub transfer_log_decimals: Option<u8>,
+}
+
+impl TokenConfig {
+    pub fn log_address(&self) -> Address {
+        self.transfer_log_address.unwrap_or(self.address)
+    }
+
+    pub fn log_decimals(&self) -> u8 {
+        self.transfer_log_decimals.unwrap_or(self.decimals)
+    }
 }
 
 impl Config {
@@ -273,9 +293,22 @@ impl Config {
             }
             let mut syms = std::collections::BTreeSet::new();
             let mut addrs = std::collections::BTreeSet::new();
+            let mut log_addrs = std::collections::BTreeSet::new();
             for t in &c.tokens {
-                if !syms.insert(t.symbol.to_uppercase()) || !addrs.insert(t.address) {
+                if !syms.insert(t.symbol.to_uppercase())
+                    || !addrs.insert(t.address)
+                    || !log_addrs.insert(t.log_address())
+                {
                     return bad(format!("chain {name}: duplicate token {}", t.symbol));
+                }
+                // 10^(log_decimals - decimals) must fit a U256 divisor; no real token comes close.
+                if t.log_decimals() < t.decimals || t.log_decimals() - t.decimals > 60 {
+                    return bad(format!(
+                        "chain {name}: token {}: transfer_log_decimals ({}) must be >= decimals ({}) and within 60 of it",
+                        t.symbol,
+                        t.log_decimals(),
+                        t.decimals
+                    ));
                 }
             }
         }
@@ -326,6 +359,34 @@ mod tests {
         // USDT is deliberately not offered on Base.
         assert_eq!(cfg.chains["base"].tokens.iter().map(|t| t.symbol.as_str()).collect::<Vec<_>>(), ["USDC"]);
         assert_eq!(cfg.chains["base"].ws_bucket_size, 500);
+    }
+
+    #[test]
+    fn arc_is_off_by_default_and_valid_once_enabled() {
+        let cfg = default_with(URLS).unwrap();
+        assert!(!cfg.chains["arc"].enabled, "a deploy without Arc endpoints must still boot");
+
+        let cfg = default_with(&format!(
+            "{URLS}\n[chains.arc]\nenabled = true\nhttp_url = \"http://arc\"\nws_url = \"ws://arc\""
+        ))
+        .unwrap();
+        let usdc = &cfg.chains["arc"].tokens[0];
+        assert_eq!((cfg.chains["arc"].chain_id, usdc.decimals, usdc.log_decimals()), (5042, 6, 18));
+        assert_eq!(usdc.address, "0x3600000000000000000000000000000000000000".parse::<Address>().unwrap());
+        assert_eq!(usdc.log_address(), "0xfffffffffffffffffffffffffffffffffffffffe".parse::<Address>().unwrap());
+    }
+
+    #[test]
+    fn transfer_log_decimals_below_token_decimals_are_rejected() {
+        let err = default_with(&format!(
+            "{URLS}\n[chains.arc]\nenabled = true\nhttp_url = \"http://arc\"\nws_url = \"ws://arc\"\n\
+             [[chains.arc.tokens]]\nsymbol = \"X\"\naddress = \"0x0000000000000000000000000000000000000001\"\n\
+             decimals = 6\ntransfer_log_address = \"0x0000000000000000000000000000000000000002\"\n\
+             transfer_log_decimals = 2"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("transfer_log_decimals"), "{err}");
     }
 
     #[test]
