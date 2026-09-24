@@ -180,6 +180,36 @@ async fn split_log_emitter_counts_each_payment_once_in_token_units(opts: PgPoolO
     let done = app.get_watch(watch.id).await;
     assert_eq!((done.status.as_str(), done.confirmed_amount), ("completed", usdc(5)));
     assert_eq!(done.transfers.unwrap().len(), 2, "dust is not a payment");
+
+    // A late registration's backfill reads the same emitter.
+    env.watch(&app, fresh_address(), usdc(1_000_000)).await; // keeps sweeps advancing the cursor
+    let late = fresh_address();
+    let handed_out = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let paid = env.chain.mint(emitter, late, wei(usdc(4))).await;
+    env.chain.mine(5).await;
+    let deadline = std::time::Instant::now() + T;
+    while app.get_json::<serde_json::Value>("/v1/chains").await["chains"][0]["health"]["confirmed_block"]
+        .as_u64()
+        .unwrap_or(0)
+        < paid.block_number
+    {
+        assert!(std::time::Instant::now() < deadline, "cursor never passed block {}", paid.block_number);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let resp = app
+        .create_watch_raw(serde_json::json!({
+            "payment_address": late, "chain": "split_emitter", "token": "USDC", "balance_threshold": usdc(10).to_string(),
+            "webhook_endpoint": env.sink.url(), "payments_since": handed_out,
+        }))
+        .await;
+    assert_eq!(resp.status(), 201);
+    let late_watch: gum_indexer::api::WatchResponse = resp.json().await.unwrap();
+    env.chain.mine(3).await;
+    let deadline = std::time::Instant::now() + T;
+    while app.get_watch(late_watch.id).await.confirmed_amount != usdc(4) {
+        assert!(std::time::Instant::now() < deadline, "backfill did not count the emitter's log");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     app.shutdown().await;
 }
 
