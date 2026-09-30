@@ -353,11 +353,19 @@ mod tests {
     #[test]
     fn default_config_is_valid_once_urls_are_set() {
         let cfg = default_with(URLS).unwrap();
+        let stablecoins = |chain: &str| {
+            cfg.chains[chain].tokens.iter().filter(|t| t.issuance != "vault").map(|t| t.symbol.as_str()).collect::<Vec<_>>()
+        };
         assert_eq!(cfg.chains["monad"].chain_id, 143);
-        assert_eq!(cfg.chains["monad"].tokens.len(), 3);
-        assert_eq!(cfg.chains["arbitrum"].tokens.len(), 2);
+        assert_eq!(stablecoins("monad"), ["USDC", "USDT", "AUSD"]);
+        assert_eq!(stablecoins("arbitrum"), ["USDC", "USDT"]);
         // USDT is deliberately not offered on Base.
-        assert_eq!(cfg.chains["base"].tokens.iter().map(|t| t.symbol.as_str()).collect::<Vec<_>>(), ["USDC"]);
+        assert_eq!(stablecoins("base"), ["USDC"]);
+        // Vault share tokens, for Switch: on the chains it runs on, all with ERC-4626's 18 decimals.
+        let vaults = |chain: &str| cfg.chains[chain].tokens.iter().filter(|t| t.issuance == "vault").collect::<Vec<_>>();
+        assert!(["base", "monad", "arc"].iter().all(|c| !vaults(c).is_empty()));
+        assert!(vaults("arbitrum").is_empty());
+        assert!(["base", "monad", "arc"].iter().flat_map(|c| vaults(c)).all(|t| t.decimals == 18));
         assert_eq!(cfg.chains["base"].ws_bucket_size, 500);
     }
 
